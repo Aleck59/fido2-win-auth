@@ -1,0 +1,11 @@
+# Build output
+/build/
+/dist/
+*.o
+*.obj
+*.exe
+*.dll.a
+*.def
+# Keep vendored libfido2 (include/bin/lib) but not any re-extracted archive
+/third_party/libfido2-raw/
+*.zip
