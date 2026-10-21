@@ -1,0 +1,92 @@
+; NSIS installer for fido2-win-auth.
+; Installs the credential provider DLL, the enroll utility, and the bundled
+; libfido2 runtime DLLs, then self-registers the provider.
+;
+; Build from the repo root:  make installer   (defines DIST=dist)
+; or directly:               makensis -DDIST=dist installer/installer.nsi
+
+!ifndef DIST
+  !define DIST "dist"
+!endif
+
+!define APPNAME     "fido2-win-auth"
+!define COMPANY     "fido2-win-auth"
+!define DESCRIPTION "FIDO2 logon for local Windows accounts"
+!define CLSID       "{b167f262-672c-49f7-ba9c-b981e7d5bb6d}"
+
+Name "${APPNAME}"
+OutFile "${DIST}/fido2-win-auth-setup.exe"
+InstallDir "$PROGRAMFILES64\${APPNAME}"
+RequestExecutionLevel admin
+Unicode true
+SetCompressor /SOLID lzma
+
+!include "MUI2.nsh"
+
+!define MUI_ABORTWARNING
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TEXT "Установка завершена.$\r$\n$\r$\nДалее запустите enroll.exe от имени администратора, чтобы зарегистрировать ключ. ОБЯЗАТЕЛЬНО сохраните запасной способ входа."
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro MUI_LANGUAGE "Russian"
+!insertmacro MUI_LANGUAGE "English"
+
+Section "Install"
+  SetOutPath "$INSTDIR"
+
+  ; Binaries.
+  File "${DIST}/fido2provider.dll"
+  File "${DIST}/enroll.exe"
+
+  ; Bundled libfido2 runtime (fido2, cbor, crypto, zlib1).
+  File "${DIST}/fido2.dll"
+  File "${DIST}/cbor.dll"
+  File "${DIST}/crypto.dll"
+  File "${DIST}/zlib1.dll"
+
+  ; Register the COM class and credential provider (via DllRegisterServer).
+  ExecWait '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\fido2provider.dll"' $0
+  ${If} $0 <> 0
+    MessageBox MB_ICONSTOP "Не удалось зарегистрировать провайдер (regsvr32 код $0)."
+  ${EndIf}
+
+  ; Uninstaller + Add/Remove Programs entry.
+  WriteUninstaller "$INSTDIR\uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+      "DisplayName" "${APPNAME} — ${DESCRIPTION}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+      "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+      "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+      "Publisher" "${COMPANY}"
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+      "NoModify" 1
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+      "NoRepair" 1
+SectionEnd
+
+Section "Uninstall"
+  ; Unregister the provider first so LogonUI stops loading it.
+  ExecWait '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\fido2provider.dll"'
+
+  Delete "$INSTDIR\fido2provider.dll"
+  Delete "$INSTDIR\enroll.exe"
+  Delete "$INSTDIR\fido2.dll"
+  Delete "$INSTDIR\cbor.dll"
+  Delete "$INSTDIR\crypto.dll"
+  Delete "$INSTDIR\zlib1.dll"
+  Delete "$INSTDIR\uninstall.exe"
+  RMDir "$INSTDIR"
+
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
+
+  ; Note: enrolled vault records under HKLM\SOFTWARE\fido2-win-auth\vaults are
+  ; left in place on uninstall so a reinstall keeps working. Remove them with
+  ; `enroll --remove <account>` or manually if you want a clean wipe.
+SectionEnd
