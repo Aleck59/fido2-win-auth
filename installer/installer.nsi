@@ -1,6 +1,7 @@
 ; NSIS installer for fido2-win-auth.
-; Installs the credential provider DLL, the enroll utility, and the bundled
-; libfido2 runtime DLLs, then self-registers the provider.
+; Installs the credential provider DLL, the enrollment tools (window and
+; console) and the bundled libfido2 runtime DLLs, then self-registers the
+; provider.
 ;
 ; Build from the repo root:  make installer   (defines DIST=dist)
 ; or directly:               makensis -DDIST=dist installer/installer.nsi
@@ -27,7 +28,10 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_TEXT "Установка завершена.$\r$\n$\r$\nДалее запустите enroll.exe от имени администратора, чтобы зарегистрировать ключ. ОБЯЗАТЕЛЬНО сохраните запасной способ входа."
+!define MUI_FINISHPAGE_TEXT "Установка завершена.$\r$\n$\r$\nДалее зарегистрируйте ключ: «Регистрация ключа FIDO2» в меню Пуск (или enroll.exe в консоли). ОБЯЗАТЕЛЬНО сохраните запасной способ входа."
+!define MUI_FINISHPAGE_RUN "$INSTDIR\fido2gui.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Зарегистрировать ключ сейчас"
+!define MUI_FINISHPAGE_RUN_NOTCHECKED
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -42,6 +46,7 @@ Section "Install"
   ; Binaries.
   File "${DIST}/fido2provider.dll"
   File "${DIST}/enroll.exe"
+  File "${DIST}/fido2gui.exe"
 
   ; Bundled libfido2 runtime (fido2, cbor, crypto, zlib1).
   File "${DIST}/fido2.dll"
@@ -54,6 +59,12 @@ Section "Install"
   ${If} $0 <> 0
     MessageBox MB_ICONSTOP "Не удалось зарегистрировать провайдер (regsvr32 код $0)."
   ${EndIf}
+
+  ; Start menu entry for the window; the console tool stays discoverable in
+  ; the install directory.
+  CreateDirectory "$SMPROGRAMS\${APPNAME}"
+  CreateShortCut "$SMPROGRAMS\${APPNAME}\Регистрация ключа FIDO2.lnk" \
+      "$INSTDIR\fido2gui.exe"
 
   ; Uninstaller + Add/Remove Programs entry.
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -77,11 +88,14 @@ Section "Uninstall"
 
   Delete "$INSTDIR\fido2provider.dll"
   Delete "$INSTDIR\enroll.exe"
+  Delete "$INSTDIR\fido2gui.exe"
   Delete "$INSTDIR\fido2.dll"
   Delete "$INSTDIR\cbor.dll"
   Delete "$INSTDIR\crypto.dll"
   Delete "$INSTDIR\zlib1.dll"
   Delete "$INSTDIR\uninstall.exe"
+  Delete "$SMPROGRAMS\${APPNAME}\Регистрация ключа FIDO2.lnk"
+  RMDir "$SMPROGRAMS\${APPNAME}"
   RMDir "$INSTDIR"
 
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"

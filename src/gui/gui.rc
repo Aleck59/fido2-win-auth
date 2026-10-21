@@ -1,0 +1,64 @@
+#include "resource.h"
+#include <windows.h>
+#include <commctrl.h>
+
+// Elevation + common controls v6 + OS compatibility.
+1 RT_MANIFEST "app.manifest"
+
+// Main window: what is enrolled, and the four things you can do about it.
+IDD_MAIN DIALOGEX 0, 0, 340, 210
+STYLE DS_SETFONT | DS_CENTER | WS_MINIMIZEBOX | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Вход по ключу FIDO2"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "Учётные записи с зарегистрированным ключом:", -1, 10, 8, 320, 10
+    CONTROL         "", IDC_LIST, WC_LISTVIEW,
+                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER |
+                    WS_TABSTOP, 10, 22, 320, 110
+    PUSHBUTTON      "Зарегистрировать…", IDC_ENROLL, 10, 140, 86, 16
+    PUSHBUTTON      "Проверить…", IDC_TEST, 102, 140, 68, 16
+    PUSHBUTTON      "Удалить", IDC_REMOVE, 176, 140, 60, 16
+    PUSHBUTTON      "Обновить", IDC_REFRESH, 270, 140, 60, 16
+    LTEXT           "", IDC_STATUS, 10, 164, 320, 20
+    LTEXT           "Держите запасной способ входа: пароль администратора или второй ключ.",
+                    -1, 10, 188, 320, 16
+END
+
+// Enrollment: account, key, PIN, password.
+IDD_ENROLL DIALOGEX 0, 0, 290, 196
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Регистрация ключа"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "Учётная запись:", -1, 10, 12, 70, 10
+    COMBOBOX        IDC_ACCOUNT, 86, 10, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Ключ:", -1, 10, 32, 70, 10
+    COMBOBOX        IDC_DEVICE, 86, 30, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "PIN ключа:", -1, 10, 54, 70, 10
+    EDITTEXT        IDC_EPIN, 86, 52, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Пароль Windows:", -1, 10, 74, 70, 10
+    EDITTEXT        IDC_PW1, 86, 72, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Повторите пароль:", -1, 10, 94, 74, 10
+    EDITTEXT        IDC_PW2, 86, 92, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Потребуется трижды коснуться ключа: создание, получение секрета и контрольная проверка.",
+                    IDC_HINT, 10, 114, 270, 18
+    LTEXT           "", IDC_ESTATUS, 10, 136, 270, 26
+    DEFPUSHBUTTON   "Зарегистрировать", IDOK, 150, 170, 76, 16
+    PUSHBUTTON      "Отмена", IDCANCEL, 232, 170, 48, 16
+END
+
+// Shared prompt for operations that only need the key and its PIN.
+IDD_KEY DIALOGEX 0, 0, 290, 130
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Проверка ключа"
+FONT 9, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "", IDC_KPROMPT, 10, 10, 270, 20
+    LTEXT           "Ключ:", -1, 10, 36, 70, 10
+    COMBOBOX        IDC_KDEVICE, 86, 34, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "PIN ключа:", -1, 10, 56, 70, 10
+    EDITTEXT        IDC_KPIN, 86, 54, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_ESTATUS, 10, 76, 270, 26
+    DEFPUSHBUTTON   "Проверить", IDOK, 162, 106, 64, 16
+    PUSHBUTTON      "Отмена", IDCANCEL, 232, 106, 48, 16
+END
