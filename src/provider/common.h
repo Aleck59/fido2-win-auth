@@ -39,3 +39,6 @@ HRESULT SHStrDupWHelper(PCWSTR source, PWSTR* dest);
 // DLL lifetime refcount (keeps the module loaded while objects are alive).
 void DllAddRef();
 void DllRelease();
+
+// This module's instance handle, for loading bitmaps and other resources.
+HINSTANCE DllInstance();

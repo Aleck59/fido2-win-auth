@@ -28,6 +28,10 @@
    касанием), расшифровывает пароль и отдаёт его Windows как обычный вход по
    паролю. Профиль, DPAPI и сетевой доступ продолжают работать.
 
+   Обращение к ключу выполняется в `Connect()` на фоновом потоке, который
+   LogonUI выделяет для этого сам, поэтому экран входа не подвисает на время
+   ожидания касания и показывает ход операции («Коснитесь ключа...»).
+
 Без физического ключа и его PIN зашифрованная запись бесполезна.
 
 ## Архитектура
@@ -90,7 +94,8 @@ make clean
 | Хранилище (HKDF-SHA256 + AES-256-GCM) | `src/common/vault.*` |
 | Работа с ключом (libfido2) | `src/common/token.*` |
 | Реестр по SID (ACL SYSTEM+Admins) | `src/common/store.*` |
-| Credential Provider (COM, `ICredentialProviderCredential2`) | `src/provider/` |
+| Credential Provider (COM, `ICredentialProviderCredential2` + `IConnectableCredentialProviderCredential`) | `src/provider/` |
+| Иконка плитки (генерируется) | `src/provider/tile.bmp`, `tools/make_tile.py` |
 | Утилита регистрации | `src/enroll/` |
 | Тесты | `tests/test_vault.cpp` |
 | Установщик | `installer/installer.nsi` |
@@ -102,10 +107,7 @@ make clean
 
 ### Известные ограничения
 
-- Операция с ключом в провайдере выполняется синхронно в `GetSerialization`,
-  то есть LogonUI ждёт касания ключа (отдельного фонового потока пока нет).
 - RDP не поддерживается (ключ на клиенте, а не на хосте сессии).
-- Нет собственной иконки плитки — используется стандартный значок провайдера.
 
 ## Безопасность и ограничения
 

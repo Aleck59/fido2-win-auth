@@ -5,11 +5,12 @@
 #include "../common/vault.h"
 #include "guid.h"
 #include "kerb.h"
+#include "resource.h"
 
 #include <strsafe.h>
 
 CFido2Credential::CFido2Credential()
-    : ref_(1), cpus_(CPUS_INVALID), events_(nullptr)
+    : ref_(1), cpus_(CPUS_INVALID), events_(nullptr), unlocked_(false)
 {
     DllAddRef();
     for (int i = 0; i < FI_NUM_FIELDS; ++i) fieldStrings_[i] = nullptr;
@@ -19,7 +20,7 @@ CFido2Credential::~CFido2Credential()
 {
     for (int i = 0; i < FI_NUM_FIELDS; ++i)
         if (fieldStrings_[i]) CoTaskMemFree(fieldStrings_[i]);
-    if (!pin_.empty()) SecureZeroMemory(&pin_[0], pin_.size() * sizeof(wchar_t));
+    ClearSecrets();
     DllRelease();
 }
 
@@ -60,6 +61,13 @@ IFACEMETHODIMP CFido2Credential::QueryInterface(REFIID riid, void** ppv)
         AddRef();
         return S_OK;
     }
+    if (riid == IID_IConnectableCredentialProviderCredential) {
+        // Answering this is what makes LogonUI call Connect() on a background
+        // thread before asking for the serialization.
+        *ppv = static_cast<IConnectableCredentialProviderCredential*>(this);
+        AddRef();
+        return S_OK;
+    }
     *ppv = nullptr;
     return E_NOINTERFACE;
 }
@@ -87,14 +95,13 @@ IFACEMETHODIMP CFido2Credential::SetSelected(BOOL* autoLogon)
 
 IFACEMETHODIMP CFido2Credential::SetDeselected()
 {
-    // Clear any typed PIN when the tile loses focus.
-    if (!pin_.empty()) SecureZeroMemory(&pin_[0], pin_.size() * sizeof(wchar_t));
-    pin_.clear();
+    // Clear the typed PIN and anything Connect() recovered.
+    ClearSecrets();
     if (fieldStrings_[FI_PIN]) {
         CoTaskMemFree(fieldStrings_[FI_PIN]);
         SHStrDupWHelper(L"", &fieldStrings_[FI_PIN]);
         if (events_)
-            events_->SetFieldString(this, FI_PIN, L"");
+            events_->SetFieldString(AsCredential(), FI_PIN, L"");
     }
     SetStatus(L"");
     return S_OK;
@@ -119,8 +126,14 @@ IFACEMETHODIMP CFido2Credential::GetStringValue(DWORD field, PWSTR* value)
 IFACEMETHODIMP CFido2Credential::GetBitmapValue(DWORD field, HBITMAP* bmp)
 {
     if (field != FI_TILEIMAGE || !bmp) return E_INVALIDARG;
-    *bmp = nullptr;  // use the system default credential-provider logo
-    return E_NOTIMPL;
+    HBITMAP loaded = LoadBitmapW(DllInstance(), MAKEINTRESOURCEW(IDB_TILE));
+    if (!loaded) {
+        // Fall back to the system default credential-provider logo.
+        *bmp = nullptr;
+        return E_NOTIMPL;
+    }
+    *bmp = loaded;
+    return S_OK;
 }
 
 IFACEMETHODIMP CFido2Credential::GetCheckboxValue(DWORD, BOOL*, PWSTR*)
@@ -165,43 +178,60 @@ void CFido2Credential::SetStatus(PCWSTR text)
 {
     if (fieldStrings_[FI_STATUS]) CoTaskMemFree(fieldStrings_[FI_STATUS]);
     SHStrDupWHelper(text ? text : L"", &fieldStrings_[FI_STATUS]);
-    if (events_) events_->SetFieldString(this, FI_STATUS, text ? text : L"");
+    if (events_) events_->SetFieldString(AsCredential(), FI_STATUS, text ? text : L"");
 }
 
-// Performs the FIDO2 assertion against whichever present key holds the
-// credential, recovers the account password, and packs it for LSA.
-IFACEMETHODIMP CFido2Credential::GetSerialization(
-    CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* response,
-    CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* serialization,
-    PWSTR* statusText, CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon)
+void CFido2Credential::Fail(const std::wstring& message)
 {
-    *response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-    *statusText = nullptr;
-    *statusIcon = CPSI_NONE;
+    connectError_ = message;
+    SetStatus(message.c_str());
+}
+
+void CFido2Credential::ClearSecrets()
+{
+    SecureClear(pin_);
+    SecureClear(password_);
+    unlocked_ = false;
+}
+
+// Talks to the key: finds the one holding this account's credential, obtains
+// the hmac-secret and decrypts the password. LogonUI runs this on a worker
+// thread, so waiting for a touch here does not freeze the logon screen, and it
+// can show progress while we wait.
+IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
+{
+    SecureClear(password_);
+    unlocked_ = false;
+    connectError_.clear();
 
     // Load this account's vault record.
     Bytes blob;
     if (!store::LoadRecord(sid_, blob)) {
-        SHStrDupWHelper(L"Для этой учётной записи нет регистрации ключа.", statusText);
-        *statusIcon = CPSI_ERROR;
-        return S_FALSE;
+        Fail(L"Для этой учётной записи нет регистрации ключа.");
+        return S_OK;
     }
 
     VaultRecord rec;
     try {
         rec = VaultRecord::Deserialize(blob);
     } catch (const std::exception&) {
-        SHStrDupWHelper(L"Повреждённая запись ключа.", statusText);
-        *statusIcon = CPSI_ERROR;
-        return S_FALSE;
+        Fail(L"Повреждённая запись ключа.");
+        return S_OK;
     }
+
+    if (qcws) qcws->SetStatusMessage(L"Поиск ключа безопасности...");
 
     auto devices = token::ListDevices();
     if (devices.empty()) {
-        SHStrDupWHelper(L"Вставьте FIDO2-ключ и повторите.", statusText);
-        *statusIcon = CPSI_WARNING;
-        return S_FALSE;
+        Fail(L"Вставьте FIDO2-ключ и повторите.");
+        return S_OK;
     }
+
+    if (qcws && qcws->QueryContinue() != S_OK) {
+        Fail(L"Отменено.");
+        return S_OK;
+    }
+    if (qcws) qcws->SetStatusMessage(L"Коснитесь ключа безопасности...");
 
     std::string pinUtf8;
     {
@@ -219,6 +249,13 @@ IFACEMETHODIMP CFido2Credential::GetSerialization(
     bool gotSecret = false;
     std::wstring lastError = L"Ключ не распознал учётные данные.";
     for (const auto& dev : devices) {
+        // Each attempt can wait on a touch, so honour a cancelled logon
+        // between keys rather than only at the end.
+        if (qcws && qcws->QueryContinue() != S_OK) {
+            SecureClear(pinUtf8);
+            Fail(L"Отменено.");
+            return S_OK;
+        }
         try {
             hmacSecret = token::GetHmacSecret(dev.path, pinUtf8, rec.credId, rec.salt);
             gotSecret = true;
@@ -227,29 +264,66 @@ IFACEMETHODIMP CFido2Credential::GetSerialization(
             lastError = Utf8ToWide(e.what());
         }
     }
-    SecureZeroMemory(&pinUtf8[0], pinUtf8.size());
+    SecureClear(pinUtf8);
 
     if (!gotSecret) {
-        SHStrDupWHelper(lastError.c_str(), statusText);
-        *statusIcon = CPSI_ERROR;
-        return S_FALSE;
+        Fail(lastError);
+        return S_OK;
     }
 
     std::wstring password;
     bool opened = vault::Open(rec, hmacSecret, password);
     SecureClear(hmacSecret);
     if (!opened) {
-        SHStrDupWHelper(L"Не удалось расшифровать пароль (неверный ключ?).", statusText);
+        Fail(L"Не удалось расшифровать пароль (неверный ключ?).");
+        return S_OK;
+    }
+
+    password_ = password;
+    SecureClear(password);
+    unlocked_ = true;
+    SetStatus(L"Ключ подтверждён. Вход...");
+    if (qcws) qcws->SetStatusMessage(L"Вход...");
+    return S_OK;
+}
+
+IFACEMETHODIMP CFido2Credential::Disconnect()
+{
+    // The password must survive until GetSerialization() consumes it; the PIN
+    // has done its job and can go now.
+    SecureClear(pin_);
+    return S_OK;
+}
+
+// Packs the password Connect() recovered into a KERB logon blob for LSA. No
+// key access happens here, so this returns promptly.
+IFACEMETHODIMP CFido2Credential::GetSerialization(
+    CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* response,
+    CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* serialization,
+    PWSTR* statusText, CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon)
+{
+    *response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+    *statusText = nullptr;
+    *statusIcon = CPSI_NONE;
+
+    if (!unlocked_) {
+        // Connect() either never ran or left a reason on connectError_.
+        SHStrDupWHelper(connectError_.empty() ? L"Вход по ключу не выполнен."
+                                              : connectError_.c_str(),
+                        statusText);
         *statusIcon = CPSI_ERROR;
         return S_FALSE;
     }
 
-    // Build the KERB logon blob.
     std::wstring domain = domain_;
     std::wstring user = user_;
     PWSTR protectedPwd = nullptr;
-    HRESULT hr = ProtectIfNecessaryAndCopyPassword(password.c_str(), cpus_, &protectedPwd);
-    SecureClear(password);
+    HRESULT hr = ProtectIfNecessaryAndCopyPassword(password_.c_str(), cpus_, &protectedPwd);
+
+    // The plaintext is either packed below or lost; either way our copy goes.
+    SecureClear(password_);
+    unlocked_ = false;
+
     if (FAILED(hr)) {
         SHStrDupWHelper(L"Внутренняя ошибка (пароль).", statusText);
         *statusIcon = CPSI_ERROR;
@@ -287,11 +361,30 @@ IFACEMETHODIMP CFido2Credential::GetSerialization(
     return S_OK;
 }
 
-IFACEMETHODIMP CFido2Credential::ReportResult(NTSTATUS, NTSTATUS, PWSTR* statusText,
+// Logon failure codes, spelled out rather than pulling in <ntstatus.h>, which
+// collides with the subset <windows.h> already defines.
+#ifndef STATUS_LOGON_FAILURE
+#define STATUS_LOGON_FAILURE ((NTSTATUS)0xC000006DL)
+#endif
+#ifndef STATUS_WRONG_PASSWORD
+#define STATUS_WRONG_PASSWORD ((NTSTATUS)0xC000006AL)
+#endif
+
+IFACEMETHODIMP CFido2Credential::ReportResult(NTSTATUS status, NTSTATUS, PWSTR* statusText,
                                               CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon)
 {
     *statusText = nullptr;
     *statusIcon = CPSI_NONE;
+
+    // The key worked but Windows rejected the password: it was almost
+    // certainly changed outside this tool, so point at the fix.
+    if (status == STATUS_LOGON_FAILURE || status == STATUS_WRONG_PASSWORD) {
+        SHStrDupWHelper(L"Сохранённый пароль устарел — выполните регистрацию заново.",
+                        statusText);
+        *statusIcon = CPSI_ERROR;
+    }
+
+    ClearSecrets();
     return S_OK;
 }
 
