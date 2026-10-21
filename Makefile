@@ -36,6 +36,9 @@ PROVIDER_SRC := src/provider/common.cpp src/provider/kerb.cpp \
                 src/provider/Dll.cpp src/provider/guids.cpp
 PROVIDER_OBJ := $(patsubst src/provider/%.cpp,$(BUILD)/prov_%.o,$(PROVIDER_SRC))
 
+# Compiled resources (the tile bitmap shown next to the sign-in option).
+PROVIDER_RES := $(BUILD)/prov_resources.o
+
 ENROLL_EXE   := $(BUILD)/enroll.exe
 PROVIDER_DLL := $(BUILD)/fido2provider.dll
 TEST_EXE     := $(BUILD)/test_vault.exe
@@ -44,7 +47,7 @@ RUNTIME_DLLS := $(wildcard $(FIDO_DIR)/bin/*.dll)
 
 # System import libraries for the provider DLL.
 PROVIDER_SYSLIBS := -lole32 -loleaut32 -ladvapi32 -lsecur32 -luser32 \
-                    -lcrypt32 -lws2_32 -luuid
+                    -lgdi32 -lcrypt32 -lws2_32 -luuid
 ENROLL_SYSLIBS   := -ladvapi32 -lole32 -lcrypt32 -lws2_32
 
 .PHONY: all clean test dist installer
@@ -60,6 +63,10 @@ $(BUILD)/common_%.o: src/common/%.cpp | $(BUILD)
 $(BUILD)/prov_%.o: src/provider/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -municode -c $< -o $@
 
+$(PROVIDER_RES): src/provider/provider.rc src/provider/resource.h \
+                 src/provider/tile.bmp | $(BUILD)
+	$(WINDRES) -I src/provider $< -O coff -o $@
+
 $(BUILD)/test_vault.o: tests/test_vault.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -69,9 +76,10 @@ $(ENROLL_EXE): src/enroll/main.cpp $(COMMON_OBJ) | $(BUILD)
 	    $(LIBDIR) $(FIDO_LIBS) $(ENROLL_SYSLIBS) -o $@
 
 # --- credential provider DLL ---------------------------------------------
-$(PROVIDER_DLL): $(PROVIDER_OBJ) $(COMMON_OBJ) src/provider/provider.def | $(BUILD)
+$(PROVIDER_DLL): $(PROVIDER_OBJ) $(PROVIDER_RES) $(COMMON_OBJ) \
+                 src/provider/provider.def | $(BUILD)
 	$(CXX) -municode -shared $(LDSTATIC) src/provider/provider.def \
-	    $(PROVIDER_OBJ) $(COMMON_OBJ) \
+	    $(PROVIDER_OBJ) $(PROVIDER_RES) $(COMMON_OBJ) \
 	    $(LIBDIR) $(FIDO_LIBS) $(PROVIDER_SYSLIBS) -o $@
 
 # --- tests ----------------------------------------------------------------
