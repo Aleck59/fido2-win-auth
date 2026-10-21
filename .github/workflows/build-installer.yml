@@ -1,0 +1,53 @@
+name: Build installer
+
+# Cross-compiles the provider DLL, enroll.exe and the vendored libfido2
+# runtime under MinGW-w64, runs the vault tests under Wine, and packages the
+# NSIS installer (.exe). The installer is uploaded as a build artifact on every
+# run, and attached to a GitHub Release when a v* tag is pushed.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create a Release on tag pushes
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (MinGW-w64, NSIS, Wine)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-mingw-w64-x86-64 nsis wine wine64 xvfb
+
+      - name: Build (DLL, enroll, tests)
+        run: make all
+
+      - name: Run vault tests under Wine
+        run: xvfb-run -a make test
+
+      - name: Build NSIS installer
+        run: make installer
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fido2-win-auth-setup
+          path: dist/fido2-win-auth-setup.exe
+          if-no-files-found: error
+
+      - name: Attach installer to Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2.0.8
+        with:
+          files: dist/fido2-win-auth-setup.exe
+          fail_on_unmatched_files: true

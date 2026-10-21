@@ -5,7 +5,10 @@
 *.obj
 *.exe
 *.dll.a
+# Ignore generated .def files (e.g. from gendef during libfido2 regen) but keep
+# the provider's hand-written module-definition file.
 *.def
+!src/provider/provider.def
 # Keep vendored libfido2 (include/bin/lib) but not any re-extracted archive
 /third_party/libfido2-raw/
 *.zip

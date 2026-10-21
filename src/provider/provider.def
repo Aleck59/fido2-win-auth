@@ -1,0 +1,6 @@
+LIBRARY fido2provider
+EXPORTS
+    DllGetClassObject       PRIVATE
+    DllCanUnloadNow         PRIVATE
+    DllRegisterServer       PRIVATE
+    DllUnregisterServer     PRIVATE
