@@ -27,7 +27,14 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            g++-mingw-w64-x86-64 nsis wine wine64 xvfb
+            g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 \
+            nsis wine wine64 xvfb
+
+      # src/provider/tile.bmp is generated; keep the committed file honest.
+      - name: Tile bitmap is reproducible
+        run: |
+          python3 tools/make_tile.py
+          git diff --exit-code -- src/provider/tile.bmp
 
       - name: Build (DLL, enroll, tests)
         run: make all

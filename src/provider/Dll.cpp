@@ -12,6 +12,7 @@ static HINSTANCE g_hinst = nullptr;
 
 void DllAddRef() { InterlockedIncrement(&g_dllRef); }
 void DllRelease() { InterlockedDecrement(&g_dllRef); }
+HINSTANCE DllInstance() { return g_hinst; }
 
 // ---- Class factory --------------------------------------------------------
 
