@@ -81,4 +81,29 @@ Bytes GetHmacSecret(const std::string& path, const std::string& pin,
 // True if the device requires/holds a client PIN (used to prompt correctly).
 bool HasClientPin(const std::string& path);
 
+// ---------------------------------------------------------------- U2F -----
+//
+// CTAP1. No extensions, no PIN, no hmac-secret: a U2F key can only register
+// and then sign a challenge. The signature proves the key is present, which is
+// all the U2fPresence vault mode asks of it -- see vault.h for why that is
+// strictly weaker.
+
+struct U2fCredential {
+    Bytes keyHandle;
+    Bytes pubKey;     // EC public key, stored so assertions can be verified
+    uint32_t counter; // signature counter at registration
+};
+
+// Registers over CTAP1. The protocol is forced, so this behaves the same on a
+// CTAP1-only key and on a CTAP2 key asked to act as one. Requires a touch.
+U2fCredential EnrollU2f(const std::string& path, const Bytes& userId,
+                        const std::string& userName);
+
+// Asserts over CTAP1 and verifies the signature against pubKey. Returns the
+// key's signature counter, which the caller should check moves forward --
+// a counter that goes backwards suggests a cloned key. Requires a touch.
+// Throws Fido2Error if the key refuses or the signature does not verify.
+uint32_t AssertU2f(const std::string& path, const Bytes& keyHandle,
+                   const Bytes& pubKey);
+
 }  // namespace token

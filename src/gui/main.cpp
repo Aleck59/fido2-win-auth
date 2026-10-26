@@ -10,6 +10,7 @@
 #include "../common/bytes.h"
 #include "../common/enrollment.h"
 #include "../common/token.h"
+#include "../common/vault.h"
 #include "resource.h"
 
 #include <windows.h>
@@ -177,6 +178,20 @@ struct EnrollState {
     bool running = false;
 };
 
+// U2F has no PIN, so grey the box out and say which touches to expect.
+void ApplyModeToDialog(HWND dlg)
+{
+    const bool u2f = IsDlgButtonChecked(dlg, IDC_U2F) == BST_CHECKED;
+    EnableWindow(GetDlgItem(dlg, IDC_EPIN), u2f ? FALSE : TRUE);
+    if (u2f) ClearText(dlg, IDC_EPIN);
+    SetStatus(dlg, IDC_HINT,
+              u2f ? L"Режим U2F: PIN не используется, потребуется дважды "
+                    L"коснуться ключа. Пароль будет защищён ключом, который "
+                    L"хранится на этом компьютере."
+                  : L"Потребуется трижды коснуться ключа: создание, получение "
+                    L"секрета и контрольная проверка.");
+}
+
 void ShowSelectedDevice(HWND dlg, EnrollState* st)
 {
     if (!st) return;
@@ -222,6 +237,7 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 SetStatus(dlg, IDC_ESTATUS, L"Ключ не найден. Вставьте ключ и "
                                             L"откройте это окно заново.");
             ShowSelectedDevice(dlg, st);
+            ApplyModeToDialog(dlg);
             return TRUE;
         }
 
@@ -253,6 +269,10 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 ShowSelectedDevice(dlg, st);
                 return TRUE;
             }
+            if (LOWORD(wp) == IDC_U2F) {
+                ApplyModeToDialog(dlg);
+                return TRUE;
+            }
             switch (LOWORD(wp)) {
                 case IDOK: {
                     if (!st || st->running) return TRUE;
@@ -270,7 +290,10 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         return TRUE;
                     }
 
-                    std::wstring pinW = GetText(dlg, IDC_EPIN);
+                    const bool u2f =
+                        IsDlgButtonChecked(dlg, IDC_U2F) == BST_CHECKED;
+
+                    std::wstring pinW = u2f ? std::wstring() : GetText(dlg, IDC_EPIN);
                     std::wstring pw1 = GetText(dlg, IDC_PW1);
                     std::wstring pw2 = GetText(dlg, IDC_PW2);
 
@@ -281,7 +304,10 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         SetStatus(dlg, IDC_ESTATUS, why);
                     };
 
-                    if (pinW.empty()) { bail(L"Введите PIN ключа."); return TRUE; }
+                    if (!u2f && pinW.empty()) {
+                        bail(L"Введите PIN ключа.");
+                        return TRUE;
+                    }
                     if (pw1.empty()) {
                         bail(L"Введите пароль Windows. Пустой пароль не подходит.");
                         return TRUE;
@@ -296,6 +322,24 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         enrollment::PasswordCheck::Wrong) {
                         bail(L"Windows отклонила этот пароль для выбранной "
                              L"учётной записи.");
+                        return TRUE;
+                    }
+
+                    if (u2f &&
+                        MessageBoxW(dlg,
+                                    L"Режим U2F слабее обычного.\n\n"
+                                    L"В CTAP1 нет hmac-secret, поэтому ключ "
+                                    L"шифрования пароля хранится на этом "
+                                    L"компьютере (DPAPI), а токен только "
+                                    L"подтверждает присутствие. Любой, кто "
+                                    L"получил права SYSTEM или администратора "
+                                    L"на этой машине, расшифрует пароль, не "
+                                    L"имея токена.\n\nПродолжить?",
+                                    L"Подтверждение режима U2F",
+                                    MB_YESNO | MB_ICONWARNING |
+                                        MB_DEFBUTTON2) != IDYES) {
+                        SecureClear(pinW);
+                        SecureClear(pw1);
                         return TRUE;
                     }
 
@@ -321,10 +365,13 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     std::string pin = WideToUtf8(pinW);
                     SecureClear(pinW);
 
+                    const VaultMode vmode = u2f ? VaultMode::U2fPresence
+                                                : VaultMode::Fido2HmacSecret;
                     const bool started = StartJob(
-                        dlg, [account, path, pin, pw1](
+                        dlg, [account, path, pin, pw1, vmode](
                                  const enrollment::ProgressFn& p) mutable {
-                            auto result = enrollment::Enroll(account, path, pin, pw1, p);
+                            auto result =
+                                enrollment::Enroll(account, path, pin, pw1, vmode, p);
                             SecureClear(pin);
                             SecureClear(pw1);
                             return result;
@@ -362,6 +409,7 @@ struct KeyState {
     std::wstring account;
     std::vector<std::string> devicePaths;
     bool running = false;
+    bool noPin = false;  // U2F record: nothing to type
 };
 
 INT_PTR CALLBACK KeyProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
@@ -375,10 +423,18 @@ INT_PTR CALLBACK KeyProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             st->account = *(const std::wstring*)lp;
             SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)st);
 
+            VaultMode mode = VaultMode::Fido2HmacSecret;
+            const bool u2f = enrollment::EnrolledMode(st->account, mode) &&
+                             mode == VaultMode::U2fPresence;
             SetStatus(dlg, IDC_KPROMPT,
                       L"Проверка входа для «" + st->account +
                           L"»: ключ расшифрует пароль, затем он будет сверен с "
-                          L"Windows.");
+                          L"Windows." +
+                          (u2f ? L" Режим U2F: PIN не нужен." : L""));
+            if (u2f) {
+                EnableWindow(GetDlgItem(dlg, IDC_KPIN), FALSE);
+                st->noPin = true;
+            }
             st->devicePaths = FillDeviceCombo(dlg, IDC_KDEVICE);
             if (st->devicePaths.empty())
                 SetStatus(dlg, IDC_ESTATUS, L"Ключ не найден.");
@@ -417,8 +473,9 @@ INT_PTR CALLBACK KeyProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         return TRUE;
                     }
 
-                    std::wstring pinW = GetText(dlg, IDC_KPIN);
-                    if (pinW.empty()) {
+                    std::wstring pinW = st->noPin ? std::wstring()
+                                                  : GetText(dlg, IDC_KPIN);
+                    if (!st->noPin && pinW.empty()) {
                         SetStatus(dlg, IDC_ESTATUS, L"Введите PIN ключа.");
                         return TRUE;
                     }
@@ -485,8 +542,12 @@ void RefreshList(HWND dlg)
         item.pszText = &name[0];
         ListView_InsertItem(list, &item);
 
+        std::wstring mode = g_rows[i].mode == VaultMode::U2fPresence ? L"U2F"
+                                                                     : L"FIDO2";
+        ListView_SetItemText(list, (int)i, 1, &mode[0]);
+
         std::wstring sid = g_rows[i].sid;
-        ListView_SetItemText(list, (int)i, 1, &sid[0]);
+        ListView_SetItemText(list, (int)i, 2, &sid[0]);
     }
 
     SetStatus(dlg, IDC_STATUS,
@@ -515,9 +576,12 @@ INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
             col.cx = 180;
             col.pszText = const_cast<PWSTR>(L"Учётная запись");
             ListView_InsertColumn(list, 0, &col);
-            col.cx = 300;
-            col.pszText = const_cast<PWSTR>(L"SID");
+            col.cx = 60;
+            col.pszText = const_cast<PWSTR>(L"Режим");
             ListView_InsertColumn(list, 1, &col);
+            col.cx = 240;
+            col.pszText = const_cast<PWSTR>(L"SID");
+            ListView_InsertColumn(list, 2, &col);
 
             RefreshList(dlg);
             return TRUE;

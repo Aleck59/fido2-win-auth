@@ -26,7 +26,7 @@ BEGIN
 END
 
 // Enrollment: account, key, PIN, password.
-IDD_ENROLL DIALOGEX 0, 0, 290, 196
+IDD_ENROLL DIALOGEX 0, 0, 290, 216
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Регистрация ключа"
 FONT 9, "Segoe UI", 400, 0, 0x0
@@ -35,18 +35,20 @@ BEGIN
     COMBOBOX        IDC_ACCOUNT, 86, 10, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Ключ:", -1, 10, 32, 70, 10
     COMBOBOX        IDC_DEVICE, 86, 30, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "PIN ключа:", -1, 10, 60, 70, 10
-    EDITTEXT        IDC_EPIN, 86, 58, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "Пароль Windows:", -1, 10, 80, 70, 10
-    EDITTEXT        IDC_PW1, 86, 78, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "Повторите пароль:", -1, 10, 100, 74, 10
-    EDITTEXT        IDC_PW2, 86, 98, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
     LTEXT           "", IDC_DEVINFO, 86, 46, 194, 9
+    AUTOCHECKBOX    "Режим U2F — слабее, см. README", IDC_U2F,
+                    10, 58, 270, 10, WS_TABSTOP
+    LTEXT           "PIN ключа:", -1, 10, 76, 70, 10
+    EDITTEXT        IDC_EPIN, 86, 74, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Пароль Windows:", -1, 10, 96, 70, 10
+    EDITTEXT        IDC_PW1, 86, 94, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Повторите пароль:", -1, 10, 116, 74, 10
+    EDITTEXT        IDC_PW2, 86, 114, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
     LTEXT           "Потребуется трижды коснуться ключа: создание, получение секрета и контрольная проверка.",
-                    IDC_HINT, 10, 114, 270, 18
-    LTEXT           "", IDC_ESTATUS, 10, 136, 270, 26
-    DEFPUSHBUTTON   "Зарегистрировать", IDOK, 150, 170, 76, 16
-    PUSHBUTTON      "Отмена", IDCANCEL, 232, 170, 48, 16
+                    IDC_HINT, 10, 134, 270, 18
+    LTEXT           "", IDC_ESTATUS, 10, 156, 270, 26
+    DEFPUSHBUTTON   "Зарегистрировать", IDOK, 150, 190, 76, 16
+    PUSHBUTTON      "Отмена", IDCANCEL, 232, 190, 48, 16
 END
 
 // Shared prompt for operations that only need the key and its PIN.

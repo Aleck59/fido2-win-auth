@@ -28,7 +28,8 @@ BUILD := build
 DIST  := dist
 
 COMMON_SRC := src/common/bytes.cpp src/common/vault.cpp \
-              src/common/token.cpp src/common/store.cpp
+              src/common/token.cpp src/common/store.cpp \
+              src/common/dpapi.cpp src/common/unlock.cpp
 COMMON_OBJ := $(patsubst src/common/%.cpp,$(BUILD)/common_%.o,$(COMMON_SRC))
 
 # Enrollment logic, shared by enroll.exe and the GUI but not by the provider:
@@ -98,8 +99,9 @@ $(PROVIDER_DLL): $(PROVIDER_OBJ) $(PROVIDER_RES) $(COMMON_OBJ) \
 	    $(LIBDIR) $(FIDO_LIBS) $(PROVIDER_SYSLIBS) -o $@
 
 # --- tests ----------------------------------------------------------------
-$(TEST_EXE): $(BUILD)/test_vault.o $(BUILD)/common_vault.o $(BUILD)/common_bytes.o
-	$(CXX) $(LDSTATIC) $^ $(LIBDIR) -lcrypto -o $@
+$(TEST_EXE): $(BUILD)/test_vault.o $(BUILD)/common_vault.o \
+             $(BUILD)/common_bytes.o $(BUILD)/common_dpapi.o
+	$(CXX) $(LDSTATIC) $^ $(LIBDIR) -lcrypto -lcrypt32 -o $@
 
 test: $(TEST_EXE)
 	@cp -f $(RUNTIME_DLLS) $(BUILD)/

@@ -2,6 +2,7 @@
 
 #include "store.h"
 #include "token.h"
+#include "unlock.h"
 #include "vault.h"
 
 #include <openssl/rand.h>
@@ -14,6 +15,25 @@ namespace {
 void Report(const ProgressFn& progress, Step s)
 {
     if (progress) progress(s);
+}
+
+// Loads and parses an account's record. Returns false if there is none.
+bool LoadRecordFor(const std::wstring& account, VaultRecord& rec)
+{
+    Bytes blob;
+    if (!store::LoadRecord(store::SidForAccount(account), blob)) return false;
+    rec = VaultRecord::Deserialize(blob);
+    SecureClear(blob);
+    return true;
+}
+
+// U2F signature counters must move forward; going backwards is the signal the
+// spec gives for a cloned key. A key that always reports 0 does not implement
+// the counter, which CTAP1 permits, so that case cannot be treated as failure.
+bool CounterAcceptable(uint32_t stored, uint32_t got)
+{
+    if (stored == 0 && got == 0) return true;
+    return got > stored;
 }
 
 }  // namespace
@@ -69,6 +89,17 @@ std::vector<Account> Enrolled()
         Account a;
         a.sid = sid;
         store::AccountForSid(sid, a.domain, a.user);  // leaves both empty if gone
+
+        Bytes blob;
+        if (store::LoadRecord(sid, blob)) {
+            try {
+                a.mode = VaultRecord::Deserialize(blob).mode;
+            } catch (const std::exception&) {
+                // A record we cannot parse still belongs in the list so it can
+                // be removed; leave the mode at its default.
+            }
+            SecureClear(blob);
+        }
         out.push_back(a);
     }
     return out;
@@ -86,9 +117,70 @@ bool IsEnrolled(const std::wstring& account)
     }
 }
 
+// CTAP1 path: register, seal with a machine-held key, then prove the record
+// opens before storing it. Two touches.
+static Status EnrollU2f(const std::wstring& account, const std::wstring& sid,
+                        const std::string& devicePath,
+                        const std::wstring& password, const ProgressFn& progress)
+{
+    const Bytes userId = ToBytes(WideToUtf8(sid));
+    const std::string userName = WideToUtf8(account);
+
+    Report(progress, Step::CreatingCredential);
+    token::U2fCredential cred;
+    try {
+        cred = token::EnrollU2f(devicePath, userId, userName);
+    } catch (const Fido2Error& e) {
+        return Status::Fail(L"Регистрация на ключе (U2F) не удалась: " +
+                            Utf8ToWide(e.what()));
+    }
+
+    VaultRecord rec;
+    try {
+        rec = vault::SealU2f(cred.keyHandle, cred.pubKey, cred.counter, password);
+    } catch (const std::exception& e) {
+        return Status::Fail(L"Ошибка шифрования: " + Utf8ToWide(e.what()));
+    }
+
+    // Same rule as the FIDO2 path: never store a record that has not been
+    // opened once. Here that also exercises the signature check.
+    Report(progress, Step::Verifying);
+    try {
+        const uint32_t counter =
+            token::AssertU2f(devicePath, rec.credId, rec.pubKey);
+        if (!CounterAcceptable(rec.counter, counter))
+            return Status::Fail(L"Счётчик ключа не вырос — возможна копия ключа. "
+                                L"Регистрация отменена.");
+        rec.counter = counter;
+    } catch (const Fido2Error& e) {
+        return Status::Fail(L"Контрольная проверка не удалась: " + Utf8ToWide(e.what()));
+    }
+
+    Bytes ikm;
+    if (!vault::RecoverU2fIkm(rec, ikm))
+        return Status::Fail(L"Не удалось прочитать ключ шифрования (DPAPI).");
+
+    std::wstring recovered;
+    const bool opened = vault::Open(rec, ikm, recovered);
+    SecureClear(ikm);
+    const bool match = opened && recovered == password;
+    SecureClear(recovered);
+    if (!match)
+        return Status::Fail(L"Контрольная расшифровка не удалась — регистрация отменена.");
+
+    Report(progress, Step::Saving);
+    try {
+        store::SaveRecord(sid, rec.Serialize());
+    } catch (const std::exception& e) {
+        return Status::Fail(L"Не удалось записать в реестр (нужны права "
+                            L"администратора): " + Utf8ToWide(e.what()));
+    }
+    return Status::Success();
+}
+
 Status Enroll(const std::wstring& account, const std::string& devicePath,
               const std::string& pin, const std::wstring& password,
-              const ProgressFn& progress)
+              VaultMode mode, const ProgressFn& progress)
 {
     std::wstring sid;
     try {
@@ -96,6 +188,9 @@ Status Enroll(const std::wstring& account, const std::string& devicePath,
     } catch (const std::exception& e) {
         return Status::Fail(L"Учётная запись не найдена: " + Utf8ToWide(e.what()));
     }
+
+    if (mode == VaultMode::U2fPresence)
+        return EnrollU2f(account, sid, devicePath, password, progress);
 
     // Without user verification a found or stolen key would be enough to log
     // in, so refuse a key with no PIN set rather than silently degrading.
@@ -167,40 +262,52 @@ Status Enroll(const std::wstring& account, const std::string& devicePath,
     return Status::Success();
 }
 
+bool EnrolledMode(const std::wstring& account, VaultMode& mode)
+{
+    try {
+        VaultRecord rec;
+        if (!LoadRecordFor(account, rec)) return false;
+        mode = rec.mode;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 Status Test(const std::wstring& account, const std::string& devicePath,
             const std::string& pin, const ProgressFn& progress)
 {
-    Bytes blob;
+    VaultRecord rec;
     try {
-        if (!store::LoadRecord(store::SidForAccount(account), blob))
+        if (!LoadRecordFor(account, rec))
             return Status::Fail(L"Для этой учётной записи нет регистрации ключа.");
+    } catch (const Fido2Error&) {
+        return Status::Fail(L"Повреждённая запись ключа.");
     } catch (const std::exception& e) {
         return Status::Fail(L"Учётная запись не найдена: " + Utf8ToWide(e.what()));
     }
 
-    VaultRecord rec;
-    try {
-        rec = VaultRecord::Deserialize(blob);
-    } catch (const std::exception&) {
-        return Status::Fail(L"Повреждённая запись ключа.");
-    }
-
     Report(progress, Step::Verifying);
-    Bytes secret;
-    try {
-        secret = token::GetHmacSecret(devicePath, pin, rec.credId, rec.salt);
-    } catch (const Fido2Error& e) {
-        return Status::Fail(L"Ключ не подтвердил учётные данные: " + Utf8ToWide(e.what()));
+    unlock::Outcome out = unlock::WithDevice(rec, devicePath, pin);
+    if (!out.ok) {
+        SecureClear(out.password);
+        return Status::Fail(out.error);
     }
 
-    std::wstring password;
-    const bool opened = vault::Open(rec, secret, password);
-    SecureClear(secret);
-    if (!opened)
-        return Status::Fail(L"Не удалось расшифровать пароль (неверный ключ?).");
+    // A test that moved the counter must persist it, or the next real logon
+    // would see a counter it has already used and reject the key.
+    if (out.counterAdvanced) {
+        rec.counter = out.counter;
+        try {
+            store::SaveRecord(store::SidForAccount(account), rec.Serialize());
+        } catch (const std::exception&) {
+            // Not fatal: the counter check tolerates a key that repeats a
+            // value only by rejecting it, and the user can re-enroll.
+        }
+    }
 
-    const PasswordCheck check = CheckWindowsPassword(account, password);
-    SecureClear(password);
+    const PasswordCheck check = CheckWindowsPassword(account, out.password);
+    SecureClear(out.password);
 
     if (check == PasswordCheck::Wrong)
         return Status::Fail(L"Пароль расшифрован, но Windows его отклонила — "

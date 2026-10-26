@@ -3,6 +3,7 @@
 #include "token.h"
 
 #include <fido.h>
+#include <fido/es256.h>
 
 #include <cstring>
 #include <memory>
@@ -42,6 +43,15 @@ void OpenDevice(DevHandle& h, const std::string& path)
     if (r != FIDO_OK) Fail("fido_dev_open", r);
     if (!fido_dev_is_fido2(h.dev))
         throw Fido2Error("device is not a FIDO2 authenticator");
+}
+
+// Opens without insisting on CTAP2. Used by the U2F paths and by Probe().
+void OpenDeviceAnyProtocol(DevHandle& h, const std::string& path)
+{
+    h.dev = fido_dev_new();
+    if (!h.dev) throw Fido2Error("fido_dev_new failed");
+    int r = fido_dev_open(h.dev, path.c_str());
+    if (r != FIDO_OK) Fail("fido_dev_open", r);
 }
 
 }  // namespace
@@ -214,6 +224,102 @@ Bytes Enroll(const std::string& path, const std::string& pin,
     size_t idLen = fido_cred_id_len(cred);
     if (!idPtr || idLen == 0) throw Fido2Error("credential has no id");
     return Bytes(idPtr, idPtr + idLen);
+}
+
+U2fCredential EnrollU2f(const std::string& path, const Bytes& userId,
+                        const std::string& userName)
+{
+    fido_init(0);
+    DevHandle h;
+    OpenDeviceAnyProtocol(h, path);
+    // Pin the protocol so a CTAP2 key behaves exactly like a CTAP1-only one;
+    // otherwise the record would depend on which key happened to be used.
+    fido_dev_force_u2f(h.dev);
+
+    fido_cred_t* cred = fido_cred_new();
+    if (!cred) throw Fido2Error("fido_cred_new failed");
+    std::unique_ptr<fido_cred_t, void (*)(fido_cred_t*)> credGuard(
+        cred, [](fido_cred_t* c) { fido_cred_free(&c); });
+
+    int r;
+    if ((r = fido_cred_set_type(cred, COSE_ES256)) != FIDO_OK)
+        Fail("fido_cred_set_type", r);
+    if ((r = fido_cred_set_clientdata(cred, kClientData, kClientDataLen)) != FIDO_OK)
+        Fail("fido_cred_set_clientdata", r);
+    if ((r = fido_cred_set_rp(cred, kRpId, kRpName)) != FIDO_OK)
+        Fail("fido_cred_set_rp", r);
+    if ((r = fido_cred_set_user(cred, userId.data(), userId.size(),
+                                userName.c_str(), userName.c_str(), nullptr)) != FIDO_OK)
+        Fail("fido_cred_set_user", r);
+    // CTAP1 has neither resident keys nor user verification; asking for either
+    // would be rejected.
+    if ((r = fido_cred_set_rk(cred, FIDO_OPT_FALSE)) != FIDO_OK)
+        Fail("fido_cred_set_rk", r);
+    if ((r = fido_cred_set_uv(cred, FIDO_OPT_FALSE)) != FIDO_OK)
+        Fail("fido_cred_set_uv", r);
+
+    if ((r = fido_dev_make_cred(h.dev, cred, nullptr)) != FIDO_OK)
+        Fail("fido_dev_make_cred (u2f)", r);
+
+    const unsigned char* idPtr = fido_cred_id_ptr(cred);
+    const size_t idLen = fido_cred_id_len(cred);
+    if (!idPtr || idLen == 0) throw Fido2Error("u2f credential has no key handle");
+
+    const unsigned char* pkPtr = fido_cred_pubkey_ptr(cred);
+    const size_t pkLen = fido_cred_pubkey_len(cred);
+    if (!pkPtr || pkLen == 0) throw Fido2Error("u2f credential has no public key");
+
+    U2fCredential out;
+    out.keyHandle.assign(idPtr, idPtr + idLen);
+    out.pubKey.assign(pkPtr, pkPtr + pkLen);
+    out.counter = 0;
+    return out;
+}
+
+uint32_t AssertU2f(const std::string& path, const Bytes& keyHandle,
+                   const Bytes& pubKey)
+{
+    if (keyHandle.empty()) throw Fido2Error("AssertU2f: empty key handle");
+    if (pubKey.empty()) throw Fido2Error("AssertU2f: empty public key");
+
+    fido_init(0);
+    DevHandle h;
+    OpenDeviceAnyProtocol(h, path);
+    fido_dev_force_u2f(h.dev);
+
+    fido_assert_t* assert = fido_assert_new();
+    if (!assert) throw Fido2Error("fido_assert_new failed");
+    std::unique_ptr<fido_assert_t, void (*)(fido_assert_t*)> assertGuard(
+        assert, [](fido_assert_t* a) { fido_assert_free(&a); });
+
+    int r;
+    if ((r = fido_assert_set_clientdata(assert, kClientData, kClientDataLen)) != FIDO_OK)
+        Fail("fido_assert_set_clientdata", r);
+    if ((r = fido_assert_set_rp(assert, kRpId)) != FIDO_OK)
+        Fail("fido_assert_set_rp", r);
+    if ((r = fido_assert_allow_cred(assert, keyHandle.data(), keyHandle.size())) != FIDO_OK)
+        Fail("fido_assert_allow_cred", r);
+    if ((r = fido_assert_set_up(assert, FIDO_OPT_TRUE)) != FIDO_OK)
+        Fail("fido_assert_set_up", r);
+
+    if ((r = fido_dev_get_assert(h.dev, assert, nullptr)) != FIDO_OK)
+        Fail("fido_dev_get_assert (u2f)", r);
+    if (fido_assert_count(assert) < 1)
+        throw Fido2Error("u2f assertion returned no statements");
+
+    // Verify against the public key recorded at registration. Without this the
+    // "assertion" would prove nothing at all: any key could answer.
+    es256_pk_t* pk = es256_pk_new();
+    if (!pk) throw Fido2Error("es256_pk_new failed");
+    std::unique_ptr<es256_pk_t, void (*)(es256_pk_t*)> pkGuard(
+        pk, [](es256_pk_t* p) { es256_pk_free(&p); });
+
+    if ((r = es256_pk_from_ptr(pk, pubKey.data(), pubKey.size())) != FIDO_OK)
+        Fail("es256_pk_from_ptr", r);
+    if ((r = fido_assert_verify(assert, 0, COSE_ES256, pk)) != FIDO_OK)
+        Fail("fido_assert_verify", r);
+
+    return fido_assert_sigcount(assert, 0);
 }
 
 Bytes GetHmacSecret(const std::string& path, const std::string& pin,

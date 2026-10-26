@@ -11,6 +11,8 @@
 
 #include "common.h"
 
+#include "../common/vault.h"
+
 #include <credentialprovider.h>
 #include <string>
 
@@ -101,4 +103,9 @@ private:
     std::wstring password_;
     std::wstring connectError_;
     bool unlocked_;
+
+    // Mode of this account's record, read once at Initialize(): a U2F record
+    // has no PIN, so the PIN field is hidden for it.
+    VaultMode mode_;
+    bool haveMode_;
 };

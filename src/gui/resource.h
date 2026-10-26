@@ -21,6 +21,7 @@
 #define IDC_ESTATUS  1015
 #define IDC_HINT     1016
 #define IDC_DEVINFO  1017
+#define IDC_U2F      1018
 
 #define IDC_KDEVICE  1020
 #define IDC_KPIN     1021

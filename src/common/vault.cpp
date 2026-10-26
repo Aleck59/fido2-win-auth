@@ -2,6 +2,8 @@
 // See vault.h for the record layout and the cryptographic contract.
 #include "vault.h"
 
+#include "dpapi.h"
+
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
@@ -12,6 +14,7 @@
 namespace {
 
 constexpr char kMagic[4] = {'F', '2', 'V', '1'};
+constexpr char kMagicU2f[4] = {'F', '2', 'U', '1'};
 constexpr size_t kSaltLen = 32;
 constexpr size_t kNonceLen = 12;
 constexpr size_t kTagLen = 16;
@@ -59,8 +62,10 @@ Bytes GetBytes(const Bytes& b, size_t& off, uint32_t n)
 
 Bytes VaultRecord::Serialize() const
 {
+    const bool u2f = mode == VaultMode::U2fPresence;
+
     Bytes out;
-    out.insert(out.end(), kMagic, kMagic + 4);
+    out.insert(out.end(), u2f ? kMagicU2f : kMagic, (u2f ? kMagicU2f : kMagic) + 4);
     PutU32(out, (uint32_t)credId.size());
     out.insert(out.end(), credId.begin(), credId.end());
     PutU32(out, (uint32_t)salt.size());
@@ -69,19 +74,42 @@ Bytes VaultRecord::Serialize() const
     out.insert(out.end(), nonce.begin(), nonce.end());
     PutU32(out, (uint32_t)ciphertext.size());
     out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+    if (u2f) {
+        PutU32(out, (uint32_t)pubKey.size());
+        out.insert(out.end(), pubKey.begin(), pubKey.end());
+        PutU32(out, (uint32_t)protectedIkm.size());
+        out.insert(out.end(), protectedIkm.begin(), protectedIkm.end());
+        PutU32(out, counter);
+    }
     return out;
 }
 
 VaultRecord VaultRecord::Deserialize(const Bytes& blob)
 {
-    if (blob.size() < 4 || std::memcmp(blob.data(), kMagic, 4) != 0)
-        throw Fido2Error("vault record: bad magic");
-    size_t off = 4;
+    if (blob.size() < 4) throw Fido2Error("vault record: bad magic");
+
     VaultRecord rec;
+    if (std::memcmp(blob.data(), kMagic, 4) == 0) {
+        rec.mode = VaultMode::Fido2HmacSecret;
+    } else if (std::memcmp(blob.data(), kMagicU2f, 4) == 0) {
+        rec.mode = VaultMode::U2fPresence;
+    } else {
+        throw Fido2Error("vault record: bad magic");
+    }
+
+    size_t off = 4;
     rec.credId = GetBytes(blob, off, GetU32(blob, off));
     rec.salt = GetBytes(blob, off, GetU32(blob, off));
     rec.nonce = GetBytes(blob, off, GetU32(blob, off));
     rec.ciphertext = GetBytes(blob, off, GetU32(blob, off));
+    if (rec.mode == VaultMode::U2fPresence) {
+        rec.pubKey = GetBytes(blob, off, GetU32(blob, off));
+        rec.protectedIkm = GetBytes(blob, off, GetU32(blob, off));
+        rec.counter = GetU32(blob, off);
+        if (rec.pubKey.empty()) throw Fido2Error("vault record: missing public key");
+        if (rec.protectedIkm.empty())
+            throw Fido2Error("vault record: missing protected key");
+    }
     if (off != blob.size()) throw Fido2Error("vault record: trailing bytes");
     if (rec.salt.size() != kSaltLen) throw Fido2Error("vault record: bad salt");
     if (rec.nonce.size() != kNonceLen) throw Fido2Error("vault record: bad nonce");
@@ -121,19 +149,28 @@ static Bytes MakeAad(const Bytes& credId, const Bytes& salt)
     return Concat(credId, salt);
 }
 
-VaultRecord Seal(const Bytes& credId, const Bytes& salt, const Bytes& hmacSecret,
-                 const std::wstring& password)
+// In U2F mode the public key is part of the record's identity, so bind it too:
+// swapping in another key's public key then invalidates the ciphertext.
+static Bytes MakeAadFor(const VaultRecord& rec)
 {
-    if (salt.size() != kSaltLen) throw Fido2Error("Seal: bad salt length");
+    Bytes aad = MakeAad(rec.credId, rec.salt);
+    if (rec.mode == VaultMode::U2fPresence)
+        aad = Concat(aad, rec.pubKey);
+    return aad;
+}
 
-    VaultRecord rec;
-    rec.credId = credId;
-    rec.salt = salt;
+// Shared sealing step: fills rec.nonce and rec.ciphertext by encrypting the
+// password under HKDF(ikm, rec.salt). Both modes differ only in where ikm
+// comes from and in what MakeAadFor() binds, so the GCM code lives once.
+static void SealInto(VaultRecord& rec, const Bytes& ikm, const std::wstring& password)
+{
+    if (rec.salt.size() != kSaltLen) throw Fido2Error("Seal: bad salt length");
+
     rec.nonce.resize(kNonceLen);
     if (RAND_bytes(rec.nonce.data(), (int)rec.nonce.size()) != 1)
         throw Fido2Error("Seal: RAND_bytes failed");
 
-    Bytes key = DeriveKey(hmacSecret, salt);
+    Bytes key = DeriveKey(ikm, rec.salt);
 
     // Plaintext = UTF-16LE password bytes (matches what Windows logon expects).
     Bytes pt;
@@ -144,7 +181,7 @@ VaultRecord Seal(const Bytes& credId, const Bytes& salt, const Bytes& hmacSecret
         pt[i * 2 + 1] = (uint8_t)(c >> 8);
     }
 
-    Bytes aad = MakeAad(credId, salt);
+    Bytes aad = MakeAadFor(rec);
 
     EvpCipherCtx ctx;
     if (!ctx.p) { SecureClear(key); SecureClear(pt); throw Fido2Error("Seal: ctx alloc failed"); }
@@ -174,16 +211,72 @@ VaultRecord Seal(const Bytes& credId, const Bytes& salt, const Bytes& hmacSecret
     ct.resize(outLen + finalLen);
     rec.ciphertext = Concat(ct, tag);
     SecureClear(ct);
+}
+
+VaultRecord Seal(const Bytes& credId, const Bytes& salt, const Bytes& hmacSecret,
+                 const std::wstring& password)
+{
+    VaultRecord rec;
+    rec.mode = VaultMode::Fido2HmacSecret;
+    rec.credId = credId;
+    rec.salt = salt;
+    SealInto(rec, hmacSecret, password);
     return rec;
 }
 
-bool Open(const VaultRecord& rec, const Bytes& hmacSecret, std::wstring& password)
+// The DPAPI blob is bound to this credential, so it cannot be lifted from one
+// record and dropped into another on the same machine.
+static Bytes IkmEntropy(const Bytes& keyHandle, const Bytes& pubKey)
+{
+    return Concat(keyHandle, pubKey);
+}
+
+VaultRecord SealU2f(const Bytes& keyHandle, const Bytes& pubKey, uint32_t counter,
+                    const std::wstring& password)
+{
+    if (keyHandle.empty()) throw Fido2Error("SealU2f: empty key handle");
+    if (pubKey.empty()) throw Fido2Error("SealU2f: empty public key");
+
+    VaultRecord rec;
+    rec.mode = VaultMode::U2fPresence;
+    rec.credId = keyHandle;
+    rec.pubKey = pubKey;
+    rec.counter = counter;
+    rec.salt.resize(kSaltLen);
+    if (RAND_bytes(rec.salt.data(), (int)rec.salt.size()) != 1)
+        throw Fido2Error("SealU2f: RAND_bytes failed");
+
+    // The ikm the token cannot supply: random, and kept on the machine.
+    Bytes ikm(kKeyLen);
+    if (RAND_bytes(ikm.data(), (int)ikm.size()) != 1) {
+        SecureClear(ikm);
+        throw Fido2Error("SealU2f: RAND_bytes failed");
+    }
+
+    try {
+        SealInto(rec, ikm, password);
+        rec.protectedIkm = dpapi::Protect(ikm, IkmEntropy(keyHandle, pubKey));
+    } catch (...) {
+        SecureClear(ikm);
+        throw;
+    }
+    SecureClear(ikm);
+    return rec;
+}
+
+bool RecoverU2fIkm(const VaultRecord& rec, Bytes& ikm)
+{
+    if (rec.mode != VaultMode::U2fPresence) return false;
+    return dpapi::Unprotect(rec.protectedIkm, IkmEntropy(rec.credId, rec.pubKey), ikm);
+}
+
+bool Open(const VaultRecord& rec, const Bytes& ikm, std::wstring& password)
 {
     if (rec.ciphertext.size() < kTagLen) return false;
 
     Bytes key;
     try {
-        key = DeriveKey(hmacSecret, rec.salt);
+        key = DeriveKey(ikm, rec.salt);
     } catch (const std::exception&) {
         return false;
     }
@@ -191,7 +284,7 @@ bool Open(const VaultRecord& rec, const Bytes& hmacSecret, std::wstring& passwor
     const size_t ctLen = rec.ciphertext.size() - kTagLen;
     const uint8_t* ctPtr = rec.ciphertext.data();
     const uint8_t* tagPtr = rec.ciphertext.data() + ctLen;
-    Bytes aad = MakeAad(rec.credId, rec.salt);
+    Bytes aad = MakeAadFor(rec);
 
     EvpCipherCtx ctx;
     if (!ctx.p) { SecureClear(key); return false; }
