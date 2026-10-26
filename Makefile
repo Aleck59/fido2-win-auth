@@ -57,6 +57,7 @@ PROVIDER_SYSLIBS := -lole32 -loleaut32 -ladvapi32 -lsecur32 -luser32 \
 ENROLL_SYSLIBS   := -ladvapi32 -lole32 -lcrypt32 -lws2_32 -lnetapi32
 GUI_SYSLIBS      := -lcomctl32 -luser32 -lgdi32 -lshell32 $(ENROLL_SYSLIBS)
 GUI_RES          := $(BUILD)/gui_resources.o
+ENROLL_RES       := $(BUILD)/enroll_resources.o
 
 .PHONY: all clean test dist installer
 all: $(ENROLL_EXE) $(GUI_EXE) $(PROVIDER_DLL) $(TEST_EXE)
@@ -72,19 +73,24 @@ $(BUILD)/prov_%.o: src/provider/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -municode -c $< -o $@
 
 $(PROVIDER_RES): src/provider/provider.rc src/provider/resource.h \
-                 src/provider/tile.bmp | $(BUILD)
+                 src/provider/tile.bmp src/common/product.h | $(BUILD)
 	$(WINDRES) --codepage=65001 -I src/provider $< -O coff -o $@
 
-$(GUI_RES): src/gui/gui.rc src/gui/resource.h src/gui/app.manifest | $(BUILD)
+$(GUI_RES): src/gui/gui.rc src/gui/resource.h src/gui/app.manifest \
+            src/gui/key.bmp src/gui/app.ico src/common/product.h | $(BUILD)
 	$(WINDRES) --codepage=65001 -I src/gui $< -O coff -o $@
 
 $(BUILD)/test_vault.o: tests/test_vault.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # --- enroll utility -------------------------------------------------------
-$(ENROLL_EXE): src/enroll/main.cpp $(COMMON_OBJ) $(FRONTEND_OBJ) | $(BUILD)
+$(ENROLL_RES): src/enroll/enroll.rc src/common/product.h src/gui/app.ico | $(BUILD)
+	$(WINDRES) --codepage=65001 -I src/enroll $< -O coff -o $@
+
+$(ENROLL_EXE): src/enroll/main.cpp $(COMMON_OBJ) $(FRONTEND_OBJ) $(ENROLL_RES) \
+               | $(BUILD)
 	$(CXX) $(CXXFLAGS) -municode $(LDSTATIC) $< $(COMMON_OBJ) $(FRONTEND_OBJ) \
-	    $(LIBDIR) $(FIDO_LIBS) $(ENROLL_SYSLIBS) -o $@
+	    $(ENROLL_RES) $(LIBDIR) $(FIDO_LIBS) $(ENROLL_SYSLIBS) -o $@
 
 # --- GUI ------------------------------------------------------------------
 $(GUI_EXE): src/gui/main.cpp $(COMMON_OBJ) $(FRONTEND_OBJ) $(GUI_RES) | $(BUILD)

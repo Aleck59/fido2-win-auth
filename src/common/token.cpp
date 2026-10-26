@@ -18,6 +18,10 @@ namespace {
 const unsigned char kClientData[] = "fido2-win-auth/local-logon/v1";
 constexpr size_t kClientDataLen = sizeof(kClientData) - 1;
 
+// A user-presence operation waits for a human; a silent query must not.
+constexpr int kTouchTimeoutMs = 25000;
+constexpr int kSilentTimeoutMs = 2000;
+
 struct DevHandle {
     fido_dev_t* dev = nullptr;
     ~DevHandle()
@@ -96,6 +100,49 @@ std::vector<std::string> CollectStrings(char* const* ptr, size_t len)
 }
 
 }  // namespace
+
+Held HoldsCredential(const std::string& path, const Bytes& credId, bool u2f)
+{
+    if (credId.empty()) return Held::Unknown;
+
+    fido_init(0);
+    try {
+        DevHandle h;
+        OpenDeviceAnyProtocol(h, path);
+        if (u2f) fido_dev_force_u2f(h.dev);
+        fido_dev_set_timeout(h.dev, kSilentTimeoutMs);
+
+        fido_assert_t* assert = fido_assert_new();
+        if (!assert) return Held::Unknown;
+        std::unique_ptr<fido_assert_t, void (*)(fido_assert_t*)> guard(
+            assert, [](fido_assert_t* a) { fido_assert_free(&a); });
+
+        if (fido_assert_set_clientdata(assert, kClientData, kClientDataLen) != FIDO_OK ||
+            fido_assert_set_rp(assert, kRpId) != FIDO_OK ||
+            fido_assert_allow_cred(assert, credId.data(), credId.size()) != FIDO_OK ||
+            // No touch: this is a question, not an authentication.
+            fido_assert_set_up(assert, FIDO_OPT_FALSE) != FIDO_OK)
+            return Held::Unknown;
+
+        const int r = fido_dev_get_assert(h.dev, assert, nullptr);
+        switch (r) {
+            case FIDO_OK:
+                return Held::Yes;
+            // The key recognised the credential and is only withholding the
+            // assertion until someone touches it -- which is still a yes.
+            case FIDO_ERR_UP_REQUIRED:
+            case FIDO_ERR_USER_PRESENCE_REQUIRED:
+                return Held::Yes;
+            case FIDO_ERR_NO_CREDENTIALS:
+                return Held::No;
+            default:
+                // Includes keys that refuse presence-less assertions at all.
+                return Held::Unknown;
+        }
+    } catch (const std::exception&) {
+        return Held::Unknown;
+    }
+}
 
 Capabilities Probe(const std::string& path)
 {
@@ -235,6 +282,7 @@ U2fCredential EnrollU2f(const std::string& path, const Bytes& userId,
     // Pin the protocol so a CTAP2 key behaves exactly like a CTAP1-only one;
     // otherwise the record would depend on which key happened to be used.
     fido_dev_force_u2f(h.dev);
+    fido_dev_set_timeout(h.dev, kTouchTimeoutMs);
 
     fido_cred_t* cred = fido_cred_new();
     if (!cred) throw Fido2Error("fido_cred_new failed");
@@ -286,6 +334,7 @@ uint32_t AssertU2f(const std::string& path, const Bytes& keyHandle,
     DevHandle h;
     OpenDeviceAnyProtocol(h, path);
     fido_dev_force_u2f(h.dev);
+    fido_dev_set_timeout(h.dev, kTouchTimeoutMs);
 
     fido_assert_t* assert = fido_assert_new();
     if (!assert) throw Fido2Error("fido_assert_new failed");
