@@ -91,7 +91,7 @@ Section "Install"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPID}" \
       "DisplayIcon" "$INSTDIR\fido2gui.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPID}" \
-      "DisplayVersion" "0.3.0.0"
+      "DisplayVersion" "0.0.2.0"
 SectionEnd
 
 Section "Uninstall"

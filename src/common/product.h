@@ -10,5 +10,5 @@
 #define PRODUCT_NAME      "FIDO win auth"
 #define PRODUCT_PUBLISHER "Aleck59"
 #define PRODUCT_COPYRIGHT "Copyright (C) 2026 Aleck59"
-#define PRODUCT_VERSION   "0.3.0.0"
-#define PRODUCT_VERSION_N 0,3,0,0
+#define PRODUCT_VERSION   "0.0.2.0"
+#define PRODUCT_VERSION_N 0,0,2,0
