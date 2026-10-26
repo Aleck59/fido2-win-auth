@@ -19,8 +19,11 @@ INC      := -I$(FIDO_DIR)/include
 LIBDIR   := -L$(FIDO_DIR)/lib
 FIDO_LIBS := -lfido2 -lcrypto -lcbor -lzlib1
 
+# -MMD -MP makes the compiler emit a .d file listing the headers each object
+# depends on; without it a changed header leaves stale objects behind and the
+# link fails on signatures that no longer match.
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Wno-delete-non-virtual-dtor \
-            -Wno-missing-field-initializers $(INC)
+            -Wno-missing-field-initializers -MMD -MP $(INC)
 # Statically link the C++/GCC runtime so no MinGW DLLs are needed at runtime.
 LDSTATIC := -static -static-libgcc -static-libstdc++
 
@@ -58,6 +61,9 @@ ENROLL_SYSLIBS   := -ladvapi32 -lole32 -lcrypt32 -lws2_32 -lnetapi32
 GUI_SYSLIBS      := -lcomctl32 -luser32 -lgdi32 -lshell32 $(ENROLL_SYSLIBS)
 GUI_RES          := $(BUILD)/gui_resources.o
 ENROLL_RES       := $(BUILD)/enroll_resources.o
+
+# Header dependencies recorded by -MMD, pulled in if they exist.
+DEPS := $(wildcard $(BUILD)/*.d)
 
 .PHONY: all clean test dist installer
 all: $(ENROLL_EXE) $(GUI_EXE) $(PROVIDER_DLL) $(TEST_EXE)
@@ -124,3 +130,5 @@ installer: dist
 
 clean:
 	rm -rf $(BUILD) $(DIST)
+
+-include $(DEPS)

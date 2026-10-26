@@ -11,6 +11,7 @@
 
 #include "common.h"
 
+#include "../common/unlock.h"
 #include "../common/vault.h"
 
 #include <credentialprovider.h>
@@ -86,6 +87,13 @@ private:
 
     // Drops the decrypted password and the typed PIN.
     void ClearSecrets();
+
+    // Waits for a key to be plugged in and runs the unlock at that moment.
+    // Used for U2F records, where a key with no button grants user presence
+    // only on insertion. Reports progress through `qcws`.
+    unlock::Outcome WaitForU2fKey(const VaultRecord& rec,
+                                  IQueryContinueWithStatus* qcws,
+                                  std::wstring& lastError);
 
     LONG ref_;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus_;

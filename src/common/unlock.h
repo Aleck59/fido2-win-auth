@@ -29,7 +29,12 @@ struct Outcome {
 
 // One attempt against one device. Dispatches on rec.mode. `pin` is ignored for
 // U2F records, which have no PIN. Never throws.
+//
+// `timeoutMs` of 0 means the default. A short one turns the U2F attempt into a
+// quick "is this key willing right now?" probe, which is how a caller can tell
+// a key that already has user presence from one that needs to be re-plugged
+// without stalling on a full timeout.
 Outcome WithDevice(const VaultRecord& rec, const std::string& devicePath,
-                   const std::string& pin);
+                   const std::string& pin, int timeoutMs = 0);
 
 }  // namespace unlock

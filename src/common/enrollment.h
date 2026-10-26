@@ -29,6 +29,16 @@ enum class Step {
 
 using ProgressFn = std::function<void(Step)>;
 
+// Called when the operation needs another user-presence event from the key.
+//
+// A key with a button can give one on demand. A key without one signals
+// presence only for a few seconds after it is plugged in, so a second touch
+// means unplugging and plugging it back in -- and the front-end is what can
+// ask for that and wait. Returns the path to continue on, which may differ
+// because a re-plugged key can enumerate under a new one, or an empty string
+// to give up.
+using NeedKeyFn = std::function<std::string(const std::string& currentPath)>;
+
 struct Account {
     std::wstring sid;
     std::wstring domain;
@@ -81,7 +91,8 @@ bool IsEnrolled(const std::wstring& account);
 // no PIN.
 Status Enroll(const std::wstring& account, const std::string& devicePath,
               const std::string& pin, const std::wstring& password,
-              VaultMode mode, const ProgressFn& progress);
+              VaultMode mode, const ProgressFn& progress,
+              const NeedKeyFn& needKey);
 
 // The mode a given account is enrolled with. False if it is not enrolled.
 bool EnrolledMode(const std::wstring& account, VaultMode& mode);

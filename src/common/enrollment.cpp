@@ -155,7 +155,8 @@ bool IsEnrolled(const std::wstring& account)
 // opens before storing it. Two touches.
 static Status EnrollU2f(const std::wstring& account, const std::wstring& sid,
                         const std::string& devicePath,
-                        const std::wstring& password, const ProgressFn& progress)
+                        const std::wstring& password, const ProgressFn& progress,
+                        const NeedKeyFn& needKey)
 {
     const Bytes userId = ToBytes(WideToUtf8(sid));
     const std::string userName = WideToUtf8(account);
@@ -178,10 +179,23 @@ static Status EnrollU2f(const std::wstring& account, const std::wstring& sid,
 
     // Same rule as the FIDO2 path: never store a record that has not been
     // opened once. Here that also exercises the signature check.
+    //
+    // Registering already consumed the one presence event a button-less key
+    // gives out when it is plugged in, and it has no button to give another.
+    // So ask the front-end to arrange a second one -- in practice, to wait for
+    // the key to be unplugged and put back -- rather than running straight
+    // into a timeout and failing an enrollment that is otherwise fine.
     Report(progress, Step::Verifying);
+    std::string verifyPath = devicePath;
+    if (needKey) {
+        verifyPath = needKey(devicePath);
+        if (verifyPath.empty())
+            return Status::Fail(L"Отменено: ключ не был подтверждён повторно.");
+    }
+
     try {
         const uint32_t counter =
-            token::AssertU2f(devicePath, rec.credId, rec.pubKey);
+            token::AssertU2f(verifyPath, rec.credId, rec.pubKey);
         if (!CounterAcceptable(rec.counter, counter))
             return Status::Fail(L"Счётчик ключа не вырос — возможна копия ключа. "
                                 L"Регистрация отменена.");
@@ -214,7 +228,8 @@ static Status EnrollU2f(const std::wstring& account, const std::wstring& sid,
 
 Status Enroll(const std::wstring& account, const std::string& devicePath,
               const std::string& pin, const std::wstring& password,
-              VaultMode mode, const ProgressFn& progress)
+              VaultMode mode, const ProgressFn& progress,
+              const NeedKeyFn& needKey)
 {
     std::wstring sid;
     try {
@@ -224,7 +239,7 @@ Status Enroll(const std::wstring& account, const std::string& devicePath,
     }
 
     if (mode == VaultMode::U2fPresence)
-        return EnrollU2f(account, sid, devicePath, password, progress);
+        return EnrollU2f(account, sid, devicePath, password, progress, needKey);
 
     // Without user verification a found or stolen key would be enough to log
     // in, so refuse a key with no PIN set rather than silently degrading.
