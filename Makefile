@@ -32,7 +32,7 @@ DIST  := dist
 
 COMMON_SRC := src/common/bytes.cpp src/common/vault.cpp \
               src/common/token.cpp src/common/store.cpp \
-              src/common/dpapi.cpp src/common/unlock.cpp
+              src/common/dpapi.cpp src/common/unlock.cpp src/common/plog.cpp
 COMMON_OBJ := $(patsubst src/common/%.cpp,$(BUILD)/common_%.o,$(COMMON_SRC))
 
 # Enrollment logic, shared by enroll.exe and the GUI but not by the provider:
