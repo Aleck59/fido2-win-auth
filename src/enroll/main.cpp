@@ -13,6 +13,7 @@
 #include "../common/bytes.h"
 #include "../common/enrollment.h"
 #include "../common/token.h"
+#include "../common/vault.h"
 
 #include <windows.h>
 
@@ -186,12 +187,23 @@ int DoRemove(const std::wstring& account)
 
 int DoTest(const std::wstring& account)
 {
+    VaultMode mode = VaultMode::Fido2HmacSecret;
+    if (!enrollment::EnrolledMode(account, mode)) {
+        Err(L"Для этой учётной записи нет регистрации ключа.");
+        return 2;
+    }
+
     std::string path;
     if (!ChooseDevice(path)) return 2;
 
-    std::wstring pinW = ReadSecret(L"PIN ключа: ");
-    std::string pin = WideToUtf8(pinW);
-    SecureClear(pinW);
+    std::string pin;
+    if (mode == VaultMode::Fido2HmacSecret) {
+        std::wstring pinW = ReadSecret(L"PIN ключа: ");
+        pin = WideToUtf8(pinW);
+        SecureClear(pinW);
+    } else {
+        Print(L"Режим U2F: PIN не используется.");
+    }
 
     const auto status = enrollment::Test(account, path, pin, ShowStep);
     SecureClear(pin);
@@ -204,16 +216,35 @@ int DoTest(const std::wstring& account)
     return 0;
 }
 
-int DoEnroll(const std::wstring& account)
+int DoEnroll(const std::wstring& account, VaultMode mode)
 {
     Print(L"Учётная запись: " + account);
+
+    if (mode == VaultMode::U2fPresence) {
+        Print(L"");
+        Print(L"ВНИМАНИЕ: режим U2F слабее.");
+        Print(L"В CTAP1 нет hmac-secret, поэтому ключ шифрования пароля хранится");
+        Print(L"на этом компьютере (DPAPI), а ключ только подтверждает присутствие.");
+        Print(L"Любой, кто получил права SYSTEM или администратора на этой машине,");
+        Print(L"расшифрует пароль, не имея токена. В обычном режиме это невозможно.");
+        Print(L"");
+        const std::wstring answer = ReadLine(L"Введите «u2f» для подтверждения: ");
+        if (answer != L"u2f") {
+            Err(L"Отменено.");
+            return 2;
+        }
+        Print(L"");
+    }
 
     std::string path;
     if (!ChooseDevice(path)) return 2;
 
-    std::wstring pinW = ReadSecret(L"PIN ключа: ");
-    std::string pin = WideToUtf8(pinW);
-    SecureClear(pinW);
+    std::string pin;
+    if (mode == VaultMode::Fido2HmacSecret) {
+        std::wstring pinW = ReadSecret(L"PIN ключа: ");
+        pin = WideToUtf8(pinW);
+        SecureClear(pinW);
+    }
 
     std::wstring password = ReadSecret(L"Пароль учётной записи Windows: ");
     std::wstring confirm = ReadSecret(L"Повторите пароль: ");
@@ -235,7 +266,8 @@ int DoEnroll(const std::wstring& account)
         return 2;
     }
 
-    const auto status = enrollment::Enroll(account, path, pin, password, ShowStep);
+    const auto status =
+        enrollment::Enroll(account, path, pin, password, mode, ShowStep);
     SecureClear(pin);
     SecureClear(password);
 
@@ -258,12 +290,14 @@ int wmain(int argc, wchar_t** argv)
     std::ios::sync_with_stdio(false);
 
     std::wstring mode, account;
+    VaultMode vaultMode = VaultMode::Fido2HmacSecret;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--list") mode = L"list";
         else if (a == L"--keys") mode = L"keys";
         else if (a == L"--remove" && i + 1 < argc) { mode = L"remove"; account = argv[++i]; }
         else if (a == L"--test" && i + 1 < argc) { mode = L"test"; account = argv[++i]; }
+        else if (a == L"--u2f") vaultMode = VaultMode::U2fPresence;
         else if (a == L"--account" && i + 1 < argc) { account = argv[++i]; }
         else if (a == L"--help" || a == L"-h") {
             Print(L"Использование:");
@@ -291,7 +325,7 @@ int wmain(int argc, wchar_t** argv)
         if (mode == L"test") return DoTest(account);
         if (account.empty()) account = CurrentUserName();
         if (account.empty()) { Err(L"Не удалось определить имя пользователя."); return 1; }
-        return DoEnroll(account);
+        return DoEnroll(account, vaultMode);
     } catch (const std::exception& e) {
         Err(L"Ошибка: " + Utf8ToWide(e.what()));
         return 1;

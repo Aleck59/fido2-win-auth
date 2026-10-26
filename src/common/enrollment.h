@@ -9,6 +9,7 @@
 #pragma once
 
 #include "bytes.h"
+#include "vault.h"
 
 #include <functional>
 #include <string>
@@ -31,6 +32,7 @@ struct Account {
     std::wstring sid;
     std::wstring domain;
     std::wstring user;
+    VaultMode mode = VaultMode::Fido2HmacSecret;
 
     // "DOMAIN\user", or the bare SID when it no longer resolves (the account
     // was deleted but its record was left behind).
@@ -65,12 +67,22 @@ bool IsEnrolled(const std::wstring& account);
 
 // Creates the credential, seals the password and stores the record. Requires
 // an elevated process. Never persists a record it has not round-tripped.
+//
+// `mode` picks what the key is worth: VaultMode::Fido2HmacSecret binds the
+// password to the token cryptographically, VaultMode::U2fPresence only checks
+// the token is there. Callers must tell the user which they are choosing --
+// see vault.h. `pin` is unused (and should be empty) in U2F mode, which has
+// no PIN.
 Status Enroll(const std::wstring& account, const std::string& devicePath,
               const std::string& pin, const std::wstring& password,
-              const ProgressFn& progress);
+              VaultMode mode, const ProgressFn& progress);
+
+// The mode a given account is enrolled with. False if it is not enrolled.
+bool EnrolledMode(const std::wstring& account, VaultMode& mode);
 
 // Recovers the stored password with the key and checks Windows still accepts
-// it -- the way to catch a password changed outside this tool.
+// it -- the way to catch a password changed outside this tool. Dispatches on
+// the mode the account was enrolled with; `pin` is ignored for U2F records.
 Status Test(const std::wstring& account, const std::string& devicePath,
             const std::string& pin, const ProgressFn& progress);
 

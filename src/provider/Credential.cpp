@@ -2,6 +2,7 @@
 
 #include "../common/store.h"
 #include "../common/token.h"
+#include "../common/unlock.h"
 #include "../common/vault.h"
 #include "guid.h"
 #include "kerb.h"
@@ -10,7 +11,8 @@
 #include <strsafe.h>
 
 CFido2Credential::CFido2Credential()
-    : ref_(1), cpus_(CPUS_INVALID), events_(nullptr), unlocked_(false)
+    : ref_(1), cpus_(CPUS_INVALID), events_(nullptr), unlocked_(false),
+      mode_(VaultMode::Fido2HmacSecret), haveMode_(false)
 {
     DllAddRef();
     for (int i = 0; i < FI_NUM_FIELDS; ++i) fieldStrings_[i] = nullptr;
@@ -33,7 +35,22 @@ HRESULT CFido2Credential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     sid_ = sid;
     domain_ = domain;
     user_ = user;
-    displayLabel_ = L"Вход по ключу FIDO2";
+    // Peek at the record so the tile can describe itself correctly. A failure
+    // here is not fatal: Connect() reports the real problem.
+    {
+        Bytes blob;
+        if (store::LoadRecord(sid_, blob)) {
+            try {
+                mode_ = VaultRecord::Deserialize(blob).mode;
+                haveMode_ = true;
+            } catch (const std::exception&) {
+            }
+            SecureClear(blob);
+        }
+    }
+
+    const bool u2f = haveMode_ && mode_ == VaultMode::U2fPresence;
+    displayLabel_ = u2f ? L"Вход по ключу U2F" : L"Вход по ключу FIDO2";
     if (!user_.empty()) displayLabel_ += L" (" + user_ + L")";
 
     // Seed the per-field string values from the static descriptors.
@@ -114,6 +131,11 @@ IFACEMETHODIMP CFido2Credential::GetFieldState(
     if (field >= FI_NUM_FIELDS || !fs || !is) return E_INVALIDARG;
     *fs = g_fieldStatePairs[field].cpfs;
     *is = g_fieldStatePairs[field].cpfis;
+    // U2F has no PIN: showing an input that is ignored would only mislead.
+    if (field == FI_PIN && haveMode_ && mode_ == VaultMode::U2fPresence) {
+        *fs = CPFS_HIDDEN;
+        *is = CPFIS_NONE;
+    }
     return S_OK;
 }
 
@@ -223,7 +245,7 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
 
     auto devices = token::ListDevices();
     if (devices.empty()) {
-        Fail(L"Вставьте FIDO2-ключ и повторите.");
+        Fail(L"Вставьте ключ безопасности и повторите.");
         return S_OK;
     }
 
@@ -243,10 +265,10 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
                                 &pinUtf8[0], n, nullptr, nullptr);
     }
 
-    // Try each present key; the one holding the credential succeeds, others
-    // fail with a benign CTAP error.
-    Bytes hmacSecret;
-    bool gotSecret = false;
+    // Try each present key; the one this record belongs to succeeds, the others
+    // answer with a benign error. unlock::WithDevice dispatches on the record's
+    // mode, so FIDO2 and U2F records follow the same loop here.
+    unlock::Outcome out;
     std::wstring lastError = L"Ключ не распознал учётные данные.";
     for (const auto& dev : devices) {
         // Each attempt can wait on a touch, so honour a cancelled logon
@@ -256,31 +278,38 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
             Fail(L"Отменено.");
             return S_OK;
         }
-        try {
-            hmacSecret = token::GetHmacSecret(dev.path, pinUtf8, rec.credId, rec.salt);
-            gotSecret = true;
-            break;
-        } catch (const Fido2Error& e) {
-            lastError = Utf8ToWide(e.what());
-        }
+
+        out = unlock::WithDevice(rec, dev.path, pinUtf8);
+        if (out.ok) break;
+
+        lastError = out.error;
+        // A definite verdict about this record (a cloned-key counter, an
+        // unreadable DPAPI blob, a failed decrypt) will not change on another
+        // key, so stop rather than making the user touch every one.
+        if (!out.wrongKey) break;
     }
     SecureClear(pinUtf8);
 
-    if (!gotSecret) {
+    if (!out.ok) {
+        SecureClear(out.password);
         Fail(lastError);
         return S_OK;
     }
 
-    std::wstring password;
-    bool opened = vault::Open(rec, hmacSecret, password);
-    SecureClear(hmacSecret);
-    if (!opened) {
-        Fail(L"Не удалось расшифровать пароль (неверный ключ?).");
-        return S_OK;
+    // A U2F logon consumes a counter value; persist it so a replay of this
+    // assertion cannot be used again.
+    if (out.counterAdvanced) {
+        rec.counter = out.counter;
+        try {
+            store::SaveRecord(sid_, rec.Serialize());
+        } catch (const std::exception&) {
+            // Logon still proceeds: refusing to let the user in because a
+            // counter could not be written would be the worse failure.
+        }
     }
 
-    password_ = password;
-    SecureClear(password);
+    password_ = out.password;
+    SecureClear(out.password);
     unlocked_ = true;
     SetStatus(L"Ключ подтверждён. Вход...");
     if (qcws) qcws->SetStatusMessage(L"Вход...");
