@@ -82,6 +82,40 @@ std::vector<std::wstring> LocalUserNames()
     return names;
 }
 
+token::Held KeyRegistered(const std::string& devicePath)
+{
+    bool sawUnknown = false;
+
+    for (const auto& sid : store::ListEnrolledSids()) {
+        Bytes blob;
+        if (!store::LoadRecord(sid, blob)) continue;
+
+        VaultRecord rec;
+        try {
+            rec = VaultRecord::Deserialize(blob);
+        } catch (const std::exception&) {
+            SecureClear(blob);
+            continue;
+        }
+        SecureClear(blob);
+
+        switch (token::HoldsCredential(devicePath, rec.credId,
+                                       rec.mode == VaultMode::U2fPresence)) {
+            case token::Held::Yes:
+                return token::Held::Yes;
+            case token::Held::Unknown:
+                sawUnknown = true;
+                break;
+            case token::Held::No:
+                break;
+        }
+    }
+
+    // "No record matched" is only meaningful if every record gave a real
+    // answer; one unreadable answer makes the whole verdict unknown.
+    return sawUnknown ? token::Held::Unknown : token::Held::No;
+}
+
 std::vector<Account> Enrolled()
 {
     std::vector<Account> out;

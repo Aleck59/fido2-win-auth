@@ -30,11 +30,13 @@ jobs:
             g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 \
             nsis wine wine64 xvfb
 
-      # src/provider/tile.bmp is generated; keep the committed file honest.
-      - name: Tile bitmap is reproducible
+      # The bitmaps and the icon are generated; keep the committed files honest.
+      - name: Generated images are reproducible
         run: |
           python3 tools/make_tile.py
-          git diff --exit-code -- src/provider/tile.bmp
+          python3 tools/make_icon.py
+          git diff --exit-code -- src/provider/tile.bmp src/gui/key.bmp \
+              src/gui/app.ico
 
       - name: Build (DLL, enroll, tests)
         run: make all

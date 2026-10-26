@@ -9,6 +9,7 @@
 #pragma once
 
 #include "bytes.h"
+#include "token.h"
 #include "vault.h"
 
 #include <functional>
@@ -59,6 +60,11 @@ PasswordCheck CheckWindowsPassword(const std::wstring& account,
 
 // Local, enrollable accounts (normal user accounts, not machine or trust ones).
 std::vector<std::wstring> LocalUserNames();
+
+// Whether an attached key matches any stored enrollment. Silent -- no touch,
+// no PIN. Unknown when the key cannot answer the question rather than when it
+// answers no; see token::Held.
+token::Held KeyRegistered(const std::string& devicePath);
 
 // Accounts that currently have a record.
 std::vector<Account> Enrolled();

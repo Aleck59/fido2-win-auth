@@ -18,6 +18,7 @@
 
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -93,15 +94,16 @@ std::wstring GetText(HWND dlg, int id)
 // is reused, so this limits exposure rather than eliminating it.
 void ClearText(HWND dlg, int id) { SetDlgItemTextW(dlg, id, L""); }
 
+// Input mistakes belong in a dialog the user has to dismiss, not on a status
+// line they may never look at.
+void ErrorBox(HWND dlg, const wchar_t* text)
+{
+    MessageBoxW(dlg, text, L"Ошибка", MB_OK | MB_ICONERROR);
+}
+
 void SetStatus(HWND dlg, int id, const std::wstring& text)
 {
     SetDlgItemTextW(dlg, id, text.c_str());
-}
-
-void EnableControls(HWND dlg, const int* ids, size_t count, bool on)
-{
-    for (size_t i = 0; i < count; ++i)
-        EnableWindow(GetDlgItem(dlg, ids[i]), on ? TRUE : FALSE);
 }
 
 // Fills a combo with the attached keys and returns their paths by index.
@@ -138,58 +140,308 @@ std::wstring ShortCapabilities(const token::Capabilities& c)
     return L"не подходит: " + Utf8ToWide(c.reason);
 }
 
-// The full report, for the "Ключи…" button.
-std::wstring DescribeKeys()
+// One row of the keys table.
+struct KeyRow {
+    std::string path;
+    std::wstring name;
+    std::wstring type;
+    std::wstring info;
+    bool registered = false;
+};
+
+// Everything the table says about one key, gathered without touching it.
+KeyRow DescribeKey(const token::Capabilities& c)
 {
-    const auto keys = token::ProbeAll();
-    if (keys.empty())
-        return L"Ключи не найдены. Вставьте ключ и нажмите «Ключи…» ещё раз.";
+    KeyRow r;
+    r.path = c.path;
 
-    std::wstring text;
-    for (const auto& k : keys) {
-        if (!text.empty()) text += L"\n";
-        std::wstring label = Utf8ToWide(k.manufacturer + " " + k.product);
-        text += label.empty() ? L"(безымянный ключ)" : label;
-        text += L"\n";
+    std::string label = c.manufacturer;
+    if (!label.empty() && !c.product.empty()) label += " ";
+    label += c.product;
+    r.name = label.empty() ? L"(безымянный ключ)" : Utf8ToWide(label);
 
-        if (k.probeFailed) {
-            text += L"    опросить не удалось: " + Utf8ToWide(k.probeError) + L"\n";
-            continue;
+    if (c.probeFailed) {
+        r.type = L"—";
+        r.info = L"опрос не удался: " + Utf8ToWide(c.probeError);
+        return r;
+    }
+
+    r.type = c.isFido2 ? L"FIDO2" : L"U2F";
+
+    std::wstring info;
+    for (const auto& v : c.versions) {
+        if (!info.empty()) info += L", ";
+        info += Utf8ToWide(v);
+    }
+    if (c.isFido2) {
+        if (!info.empty()) info += L"; ";
+        info += c.hmacSecret ? L"hmac-secret есть" : L"hmac-secret нет";
+    }
+    info += L"; PIN ";
+    info += c.pinSet ? L"задан"
+                     : (c.clientPinSupported ? L"не задан" : L"не поддерживается");
+
+    // Asking whether this key already holds one of our credentials needs an
+    // assertion with user presence switched off -- no touch, no PIN.
+    switch (enrollment::KeyRegistered(c.path)) {
+        case token::Held::Yes:
+            r.registered = true;
+            break;
+        case token::Held::No:
+            break;
+        case token::Held::Unknown:
+            // Not the same as "no": say so rather than showing a bare
+            // unticked box that reads as a definite answer.
+            info += L"; регистрацию проверить не удалось";
+            break;
+    }
+
+    r.info = info;
+    return r;
+}
+
+// --------------------------------------------------------------- confirm ---
+//
+// The window that drives the key. It exists because of how user presence
+// works: a key with a button signals presence when touched, but a key without
+// one signals it only for a few seconds right after it is plugged in. Waiting
+// for the key to appear and firing the operation at that moment is the only
+// sequence that works for both, so this dialog watches for an arrival instead
+// of demanding that a key already be there.
+
+constexpr UINT_PTR kArrivalTimer = 1;
+constexpr UINT kArrivalPollMs = 600;
+
+struct ConfirmParams {
+    std::wstring account;
+    VaultMode mode = VaultMode::Fido2HmacSecret;
+    bool isTest = false;
+
+    std::string pin;            // wiped by the dialog
+    std::wstring password;      // wiped by the dialog
+    std::string preferredPath;  // whatever was picked in the previous dialog
+
+    enrollment::Status status;  // out
+};
+
+struct ConfirmState {
+    ConfirmParams* p = nullptr;
+    HBITMAP bmp = nullptr;
+    std::set<std::string> baseline;  // keys already present when we opened
+    bool running = false;
+};
+
+std::set<std::string> CurrentPaths()
+{
+    std::set<std::string> paths;
+    try {
+        for (const auto& d : token::ListDevices()) paths.insert(d.path);
+    } catch (const std::exception&) {
+    }
+    return paths;
+}
+
+void ShowWaitingText(HWND dlg, bool anyPresent)
+{
+    SetStatus(dlg, IDC_CTITLE, L"Вставьте ключ");
+    SetStatus(
+        dlg, IDC_CTEXT,
+        anyPresent
+            ? L"Ключ уже вставлен — извлеките его и вставьте заново.\n\n"
+              L"На ключах без кнопки подтверждение действует только первые "
+              L"секунды после подключения, поэтому операция запускается в "
+              L"момент, когда ключ появляется.\n\n"
+              L"Если на ключе есть кнопка — можно нажать «Использовать "
+              L"вставленный ключ»."
+            : L"Вставьте ключ в USB-порт — операция начнётся сама.\n\n"
+              L"На ключах без кнопки подтверждение действует только первые "
+              L"секунды после подключения, поэтому ждать приходится именно "
+              L"подключения.\n\n"
+              L"Если на ключе есть кнопка — коснитесь её, когда он замигает.");
+}
+
+void StartKeyJob(HWND dlg, ConfirmState* st, const std::string& path)
+{
+    if (!st || st->running) return;
+    st->running = true;
+    KillTimer(dlg, kArrivalTimer);
+
+    EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT), FALSE);
+    EnableWindow(GetDlgItem(dlg, IDCANCEL), FALSE);
+    SetStatus(dlg, IDC_CTITLE, L"Работа с ключом");
+    SetStatus(dlg, IDC_CTEXT,
+              L"Не извлекайте ключ. Если он замигает, коснитесь его.");
+    SetStatus(dlg, IDC_CSTATUS, L"Обращение к ключу…");
+
+    ConfirmParams* p = st->p;
+    const std::wstring account = p->account;
+    const VaultMode mode = p->mode;
+    const bool isTest = p->isTest;
+    std::string pin = p->pin;
+    std::wstring password = p->password;
+
+    const bool started = StartJob(
+        dlg, [account, path, pin, password, mode, isTest](
+                 const enrollment::ProgressFn& progress) mutable {
+            auto result =
+                isTest ? enrollment::Test(account, path, pin, progress)
+                       : enrollment::Enroll(account, path, pin, password, mode,
+                                            progress);
+            SecureClear(pin);
+            SecureClear(password);
+            return result;
+        });
+    SecureClear(pin);
+    SecureClear(password);
+
+    if (!started) {
+        st->running = false;
+        EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
+        SetStatus(dlg, IDC_CSTATUS, L"Не удалось запустить операцию.");
+        SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+    }
+}
+
+INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    auto* st = (ConfirmState*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_INITDIALOG: {
+            st = new ConfirmState();
+            st->p = (ConfirmParams*)lp;
+            SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)st);
+
+            st->bmp = LoadBitmapW(g_inst, MAKEINTRESOURCEW(IDB_KEY));
+            if (st->bmp)
+                SendDlgItemMessageW(dlg, IDC_KEYPIC, STM_SETIMAGE, IMAGE_BITMAP,
+                                    (LPARAM)st->bmp);
+
+            SetWindowTextW(dlg, st->p->isTest ? L"Проверка ключа"
+                                              : L"Регистрация ключа");
+
+            st->baseline = CurrentPaths();
+            ShowWaitingText(dlg, !st->baseline.empty());
+            EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
+                         st->baseline.empty() ? FALSE : TRUE);
+            SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+            return TRUE;
         }
 
-        text += std::wstring(L"    протокол: ") +
-                (k.isFido2 ? L"CTAP2 (FIDO2)" : L"только U2F (CTAP1)") + L"\n";
-        text += std::wstring(L"    hmac-secret: ") +
-                (k.hmacSecret ? L"есть" : L"нет") + L"\n";
-        text += std::wstring(L"    PIN: ") +
-                (k.pinSet ? L"задан"
-                          : (k.clientPinSupported ? L"поддерживается, но не задан"
-                                                  : L"не поддерживается")) + L"\n";
-        text += k.usable ? L"    Пригоден для регистрации.\n"
-                         : L"    НЕ пригоден: " + Utf8ToWide(k.reason) + L".\n";
+        case WM_TIMER: {
+            if (!st || st->running) return TRUE;
+            const std::set<std::string> now = CurrentPaths();
+
+            // A key that was not there a moment ago has just been plugged in:
+            // this is the window in which a button-less key will accept the
+            // operation, so take it immediately.
+            for (const auto& path : now) {
+                if (st->baseline.count(path) == 0) {
+                    StartKeyJob(dlg, st, path);
+                    return TRUE;
+                }
+            }
+
+            // Keys removed since we opened can be inserted again to trigger
+            // the branch above.
+            st->baseline = now;
+            EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
+                         now.empty() ? FALSE : TRUE);
+            return TRUE;
+        }
+
+        case WM_JOB_PROGRESS:
+            SetStatus(dlg, IDC_CSTATUS, StepText((enrollment::Step)wp));
+            return TRUE;
+
+        case WM_JOB_DONE: {
+            std::unique_ptr<enrollment::Status> status((enrollment::Status*)lp);
+            if (!st) return TRUE;
+            st->running = false;
+
+            if (status->ok) {
+                st->p->status = *status;
+                EndDialog(dlg, IDOK);
+                return TRUE;
+            }
+
+            // Not fatal: the usual cause is missing the presence window, and
+            // the fix is simply to plug the key in again. Keep waiting.
+            st->p->status = *status;
+            SetStatus(dlg, IDC_CSTATUS, status->error);
+            st->baseline = CurrentPaths();
+            ShowWaitingText(dlg, !st->baseline.empty());
+            EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
+                         st->baseline.empty() ? FALSE : TRUE);
+            EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
+            SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+            return TRUE;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wp)) {
+                case IDC_USEPRESENT: {
+                    if (!st || st->running) return TRUE;
+                    const std::set<std::string> now = CurrentPaths();
+                    if (now.empty()) {
+                        SetStatus(dlg, IDC_CSTATUS, L"Ключ не найден.");
+                        return TRUE;
+                    }
+                    // Prefer whatever was chosen a dialog ago, if it is still
+                    // attached.
+                    const std::string path =
+                        now.count(st->p->preferredPath) ? st->p->preferredPath
+                                                        : *now.begin();
+                    StartKeyJob(dlg, st, path);
+                    return TRUE;
+                }
+
+                case IDCANCEL:
+                    if (st && st->running) return TRUE;
+                    EndDialog(dlg, IDCANCEL);
+                    return TRUE;
+            }
+            return FALSE;
+
+        case WM_DESTROY:
+            if (st) {
+                KillTimer(dlg, kArrivalTimer);
+                if (st->bmp) DeleteObject(st->bmp);
+                delete st;
+                SetWindowLongPtrW(dlg, GWLP_USERDATA, 0);
+            }
+            return FALSE;
     }
-    return text;
+    return FALSE;
+}
+
+// Runs one key operation, showing the confirmation window. Returns true on
+// success; `p.status` carries the reason otherwise.
+bool RunWithKey(HWND parent, ConfirmParams& p)
+{
+    const INT_PTR r = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_CONFIRM),
+                                      parent, ConfirmProc, (LPARAM)&p);
+    SecureClear(p.pin);
+    SecureClear(p.password);
+    return r == IDOK;
 }
 
 // ---------------------------------------------------------------- enroll ---
 
 struct EnrollState {
     std::vector<std::string> devicePaths;
-    bool running = false;
 };
 
-// U2F has no PIN, so grey the box out and say which touches to expect.
+// U2F has no PIN, so grey the box out and say so.
 void ApplyModeToDialog(HWND dlg)
 {
     const bool u2f = IsDlgButtonChecked(dlg, IDC_U2F) == BST_CHECKED;
     EnableWindow(GetDlgItem(dlg, IDC_EPIN), u2f ? FALSE : TRUE);
     if (u2f) ClearText(dlg, IDC_EPIN);
     SetStatus(dlg, IDC_HINT,
-              u2f ? L"Режим U2F: PIN не используется, потребуется дважды "
-                    L"коснуться ключа. Пароль будет защищён ключом, который "
-                    L"хранится на этом компьютере."
-                  : L"Потребуется трижды коснуться ключа: создание, получение "
-                    L"секрета и контрольная проверка.");
+              u2f ? L"Режим U2F: PIN не используется. Пароль будет защищён "
+                    L"ключом, который хранится на этом компьютере."
+                  : L"");
 }
 
 void ShowSelectedDevice(HWND dlg, EnrollState* st)
@@ -204,10 +456,8 @@ void ShowSelectedDevice(HWND dlg, EnrollState* st)
               ShortCapabilities(token::Probe(st->devicePaths[(size_t)idx])));
 }
 
-INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
 {
-    static const int kInputs[] = {IDC_ACCOUNT, IDC_DEVICE, IDC_EPIN,
-                                  IDC_PW1,     IDC_PW2,    IDOK};
     auto* st = (EnrollState*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
 
     switch (msg) {
@@ -232,35 +482,12 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 SendMessageW(accounts, CB_SETCURSEL, 0, 0);
             }
 
+            // No key needs to be attached yet: the confirmation window waits
+            // for one, and on button-less keys it has to be plugged in there
+            // anyway.
             st->devicePaths = FillDeviceCombo(dlg, IDC_DEVICE);
-            if (st->devicePaths.empty())
-                SetStatus(dlg, IDC_ESTATUS, L"Ключ не найден. Вставьте ключ и "
-                                            L"откройте это окно заново.");
             ShowSelectedDevice(dlg, st);
             ApplyModeToDialog(dlg);
-            return TRUE;
-        }
-
-        case WM_JOB_PROGRESS:
-            SetStatus(dlg, IDC_ESTATUS, StepText((enrollment::Step)wp));
-            return TRUE;
-
-        case WM_JOB_DONE: {
-            std::unique_ptr<enrollment::Status> status((enrollment::Status*)lp);
-            if (st) st->running = false;
-            EnableControls(dlg, kInputs, ARRAYSIZE(kInputs), true);
-            EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
-
-            if (status->ok) {
-                MessageBoxW(dlg,
-                            L"Ключ зарегистрирован.\n\nСохраните запасной способ "
-                            L"входа (пароль администратора или второй ключ) на "
-                            L"случай утери ключа.",
-                            L"Готово", MB_OK | MB_ICONINFORMATION);
-                EndDialog(dlg, IDOK);
-            } else {
-                SetStatus(dlg, IDC_ESTATUS, status->error);
-            }
             return TRUE;
         }
 
@@ -275,23 +502,15 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             }
             switch (LOWORD(wp)) {
                 case IDOK: {
-                    if (!st || st->running) return TRUE;
-
-                    const LRESULT devIdx =
-                        SendMessageW(GetDlgItem(dlg, IDC_DEVICE), CB_GETCURSEL, 0, 0);
-                    if (devIdx == CB_ERR || (size_t)devIdx >= st->devicePaths.size()) {
-                        SetStatus(dlg, IDC_ESTATUS, L"Выберите ключ.");
-                        return TRUE;
-                    }
-
-                    const std::wstring account = GetText(dlg, IDC_ACCOUNT);
-                    if (account.empty()) {
-                        SetStatus(dlg, IDC_ESTATUS, L"Выберите учётную запись.");
-                        return TRUE;
-                    }
+                    if (!st) return TRUE;
 
                     const bool u2f =
                         IsDlgButtonChecked(dlg, IDC_U2F) == BST_CHECKED;
+                    const std::wstring account = GetText(dlg, IDC_ACCOUNT);
+                    if (account.empty()) {
+                        ErrorBox(dlg, L"Выберите учётную запись.");
+                        return TRUE;
+                    }
 
                     std::wstring pinW = u2f ? std::wstring() : GetText(dlg, IDC_EPIN);
                     std::wstring pw1 = GetText(dlg, IDC_PW1);
@@ -301,7 +520,7 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         SecureClear(pinW);
                         SecureClear(pw1);
                         SecureClear(pw2);
-                        SetStatus(dlg, IDC_ESTATUS, why);
+                        ErrorBox(dlg, why);
                     };
 
                     if (!u2f && pinW.empty()) {
@@ -312,9 +531,11 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         bail(L"Введите пароль Windows. Пустой пароль не подходит.");
                         return TRUE;
                     }
-                    if (pw1 != pw2) { bail(L"Пароли не совпадают."); return TRUE; }
+                    if (pw1 != pw2) {
+                        bail(L"Пароли не совпадают.");
+                        return TRUE;
+                    }
                     SecureClear(pw2);
-                    ClearText(dlg, IDC_PW2);
 
                     // Catch a mistyped password now, rather than at the logon
                     // screen where it is much harder to diagnose.
@@ -354,42 +575,39 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                         return TRUE;
                     }
 
-                    st->running = true;
-                    EnableControls(dlg, kInputs, ARRAYSIZE(kInputs), false);
-                    EnableWindow(GetDlgItem(dlg, IDCANCEL), FALSE);
-                    SetStatus(dlg, IDC_ESTATUS, L"Обращение к ключу…");
+                    ConfirmParams p;
+                    p.account = account;
+                    p.mode = u2f ? VaultMode::U2fPresence
+                                 : VaultMode::Fido2HmacSecret;
+                    p.isTest = false;
+                    p.pin = WideToUtf8(pinW);
+                    p.password = pw1;
+                    const LRESULT devIdx = SendMessageW(
+                        GetDlgItem(dlg, IDC_DEVICE), CB_GETCURSEL, 0, 0);
+                    if (devIdx != CB_ERR &&
+                        (size_t)devIdx < st->devicePaths.size())
+                        p.preferredPath = st->devicePaths[(size_t)devIdx];
+
+                    SecureClear(pinW);
+                    SecureClear(pw1);
                     ClearText(dlg, IDC_EPIN);
                     ClearText(dlg, IDC_PW1);
+                    ClearText(dlg, IDC_PW2);
 
-                    const std::string path = st->devicePaths[(size_t)devIdx];
-                    std::string pin = WideToUtf8(pinW);
-                    SecureClear(pinW);
-
-                    const VaultMode vmode = u2f ? VaultMode::U2fPresence
-                                                : VaultMode::Fido2HmacSecret;
-                    const bool started = StartJob(
-                        dlg, [account, path, pin, pw1, vmode](
-                                 const enrollment::ProgressFn& p) mutable {
-                            auto result =
-                                enrollment::Enroll(account, path, pin, pw1, vmode, p);
-                            SecureClear(pin);
-                            SecureClear(pw1);
-                            return result;
-                        });
-                    SecureClear(pin);
-                    SecureClear(pw1);
-
-                    if (!started) {
-                        st->running = false;
-                        EnableControls(dlg, kInputs, ARRAYSIZE(kInputs), true);
-                        EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
-                        SetStatus(dlg, IDC_ESTATUS, L"Не удалось запустить операцию.");
+                    const bool ok = RunWithKey(dlg, p);
+                    if (ok) {
+                        MessageBoxW(dlg,
+                                    L"Ключ зарегистрирован.\n\nСохраните "
+                                    L"запасной способ входа (пароль "
+                                    L"администратора или второй ключ) на "
+                                    L"случай утери ключа.",
+                                    L"Готово", MB_OK | MB_ICONINFORMATION);
+                        EndDialog(dlg, IDOK);
                     }
                     return TRUE;
                 }
 
                 case IDCANCEL:
-                    if (st && st->running) return TRUE;  // let the key finish
                     EndDialog(dlg, IDCANCEL);
                     return TRUE;
             }
@@ -408,13 +626,11 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 struct KeyState {
     std::wstring account;
     std::vector<std::string> devicePaths;
-    bool running = false;
     bool noPin = false;  // U2F record: nothing to type
 };
 
 INT_PTR CALLBACK KeyProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
-    static const int kInputs[] = {IDC_KDEVICE, IDC_KPIN, IDOK};
     auto* st = (KeyState*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
 
     switch (msg) {
@@ -435,82 +651,46 @@ INT_PTR CALLBACK KeyProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 EnableWindow(GetDlgItem(dlg, IDC_KPIN), FALSE);
                 st->noPin = true;
             }
+
             st->devicePaths = FillDeviceCombo(dlg, IDC_KDEVICE);
-            if (st->devicePaths.empty())
-                SetStatus(dlg, IDC_ESTATUS, L"Ключ не найден.");
-            return TRUE;
-        }
-
-        case WM_JOB_PROGRESS:
-            SetStatus(dlg, IDC_ESTATUS, StepText((enrollment::Step)wp));
-            return TRUE;
-
-        case WM_JOB_DONE: {
-            std::unique_ptr<enrollment::Status> status((enrollment::Status*)lp);
-            if (st) st->running = false;
-            EnableControls(dlg, kInputs, ARRAYSIZE(kInputs), true);
-            EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
-
-            if (status->ok) {
-                MessageBoxW(dlg, L"Проверка пройдена: вход по ключу работает.",
-                            L"Готово", MB_OK | MB_ICONINFORMATION);
-                EndDialog(dlg, IDOK);
-            } else {
-                SetStatus(dlg, IDC_ESTATUS, status->error);
-            }
             return TRUE;
         }
 
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDOK: {
-                    if (!st || st->running) return TRUE;
-
-                    const LRESULT devIdx =
-                        SendMessageW(GetDlgItem(dlg, IDC_KDEVICE), CB_GETCURSEL, 0, 0);
-                    if (devIdx == CB_ERR || (size_t)devIdx >= st->devicePaths.size()) {
-                        SetStatus(dlg, IDC_ESTATUS, L"Выберите ключ.");
-                        return TRUE;
-                    }
+                    if (!st) return TRUE;
 
                     std::wstring pinW = st->noPin ? std::wstring()
                                                   : GetText(dlg, IDC_KPIN);
                     if (!st->noPin && pinW.empty()) {
-                        SetStatus(dlg, IDC_ESTATUS, L"Введите PIN ключа.");
+                        ErrorBox(dlg, L"Введите PIN ключа.");
                         return TRUE;
                     }
 
-                    st->running = true;
-                    EnableControls(dlg, kInputs, ARRAYSIZE(kInputs), false);
-                    EnableWindow(GetDlgItem(dlg, IDCANCEL), FALSE);
-                    SetStatus(dlg, IDC_ESTATUS, L"Обращение к ключу…");
+                    ConfirmParams p;
+                    p.account = st->account;
+                    p.isTest = true;
+                    p.pin = WideToUtf8(pinW);
+                    const LRESULT devIdx = SendMessageW(
+                        GetDlgItem(dlg, IDC_KDEVICE), CB_GETCURSEL, 0, 0);
+                    if (devIdx != CB_ERR &&
+                        (size_t)devIdx < st->devicePaths.size())
+                        p.preferredPath = st->devicePaths[(size_t)devIdx];
+
+                    SecureClear(pinW);
                     ClearText(dlg, IDC_KPIN);
 
-                    const std::string path = st->devicePaths[(size_t)devIdx];
-                    const std::wstring account = st->account;
-                    std::string pin = WideToUtf8(pinW);
-                    SecureClear(pinW);
-
-                    const bool started = StartJob(
-                        dlg, [account, path, pin](
-                                 const enrollment::ProgressFn& p) mutable {
-                            auto result = enrollment::Test(account, path, pin, p);
-                            SecureClear(pin);
-                            return result;
-                        });
-                    SecureClear(pin);
-
-                    if (!started) {
-                        st->running = false;
-                        EnableControls(dlg, kInputs, ARRAYSIZE(kInputs), true);
-                        EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
-                        SetStatus(dlg, IDC_ESTATUS, L"Не удалось запустить операцию.");
+                    if (RunWithKey(dlg, p)) {
+                        MessageBoxW(dlg,
+                                    L"Проверка пройдена: вход по ключу работает.",
+                                    L"Готово", MB_OK | MB_ICONINFORMATION);
+                        EndDialog(dlg, IDOK);
                     }
                     return TRUE;
                 }
 
                 case IDCANCEL:
-                    if (st && st->running) return TRUE;
                     EndDialog(dlg, IDCANCEL);
                     return TRUE;
             }
@@ -527,6 +707,34 @@ INT_PTR CALLBACK KeyProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 // ------------------------------------------------------------------ main ---
 
 std::vector<enrollment::Account> g_rows;
+std::vector<KeyRow> g_keys;
+
+// Set while we write the check states ourselves, so the guard that keeps the
+// user from toggling them does not fight our own updates.
+bool g_settingChecks = false;
+
+void RefreshKeys(HWND dlg)
+{
+    HWND list = GetDlgItem(dlg, IDC_KEYLIST);
+
+    g_settingChecks = true;
+    ListView_DeleteAllItems(list);
+    g_keys.clear();
+
+    for (const auto& cap : token::ProbeAll()) g_keys.push_back(DescribeKey(cap));
+
+    for (size_t i = 0; i < g_keys.size(); ++i) {
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = (int)i;
+        item.pszText = &g_keys[i].name[0];
+        ListView_InsertItem(list, &item);
+        ListView_SetItemText(list, (int)i, 1, &g_keys[i].type[0]);
+        ListView_SetItemText(list, (int)i, 2, &g_keys[i].info[0]);
+        ListView_SetCheckState(list, (int)i, g_keys[i].registered ? TRUE : FALSE);
+    }
+    g_settingChecks = false;
+}
 
 void RefreshList(HWND dlg)
 {
@@ -550,11 +758,13 @@ void RefreshList(HWND dlg)
         ListView_SetItemText(list, (int)i, 2, &sid[0]);
     }
 
-    SetStatus(dlg, IDC_STATUS,
-              g_rows.empty()
-                  ? L"Ни одна учётная запись не зарегистрирована. Нажмите "
-                    L"«Зарегистрировать…»."
-                  : L"Зарегистрировано записей: " + std::to_wstring(g_rows.size()) + L".");
+    std::wstring status;
+    if (g_keys.empty())
+        status = L"Ключей не найдено. Вставьте ключ и нажмите «Обновить». ";
+    status += g_rows.empty()
+                  ? L"Ни одна учётная запись не зарегистрирована."
+                  : L"Зарегистрировано записей: " + std::to_wstring(g_rows.size()) + L".";
+    SetStatus(dlg, IDC_STATUS, status);
 }
 
 // Index into g_rows, or -1.
@@ -563,16 +773,32 @@ int SelectedRow(HWND dlg)
     return ListView_GetNextItem(GetDlgItem(dlg, IDC_LIST), -1, LVNI_SELECTED);
 }
 
-INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
+INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
         case WM_INITDIALOG: {
+            LVCOLUMNW col{};
+            col.mask = LVCF_TEXT | LVCF_WIDTH;
+
+            // The check box marks a key this program already has a record
+            // for; it is a readout, not an input (see LVN_ITEMCHANGING).
+            HWND keys = GetDlgItem(dlg, IDC_KEYLIST);
+            ListView_SetExtendedListViewStyle(
+                keys, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES |
+                          LVS_EX_CHECKBOXES);
+            col.cx = 190;
+            col.pszText = const_cast<PWSTR>(L"Ключ (зарегистрирован)");
+            ListView_InsertColumn(keys, 0, &col);
+            col.cx = 60;
+            col.pszText = const_cast<PWSTR>(L"Тип");
+            ListView_InsertColumn(keys, 1, &col);
+            col.cx = 330;
+            col.pszText = const_cast<PWSTR>(L"Служебные данные");
+            ListView_InsertColumn(keys, 2, &col);
+
             HWND list = GetDlgItem(dlg, IDC_LIST);
             ListView_SetExtendedListViewStyle(
                 list, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-
-            LVCOLUMNW col{};
-            col.mask = LVCF_TEXT | LVCF_WIDTH;
             col.cx = 180;
             col.pszText = const_cast<PWSTR>(L"Учётная запись");
             ListView_InsertColumn(list, 0, &col);
@@ -583,25 +809,41 @@ INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
             col.pszText = const_cast<PWSTR>(L"SID");
             ListView_InsertColumn(list, 2, &col);
 
+            RefreshKeys(dlg);
             RefreshList(dlg);
             return TRUE;
+        }
+
+        case WM_NOTIFY: {
+            auto* nm = (LPNMHDR)lp;
+            if (nm->idFrom == IDC_KEYLIST && nm->code == LVN_ITEMCHANGING &&
+                !g_settingChecks) {
+                auto* nv = (LPNMLISTVIEW)lp;
+                // Refuse user edits of the check box: it reports what the
+                // registry holds, and letting it be ticked would invent a
+                // registration that does not exist.
+                if ((nv->uChanged & LVIF_STATE) &&
+                    ((nv->uNewState ^ nv->uOldState) & LVIS_STATEIMAGEMASK)) {
+                    SetWindowLongPtrW(dlg, DWLP_MSGRESULT, TRUE);
+                    return TRUE;
+                }
+            }
+            return FALSE;
         }
 
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDC_REFRESH:
+                    RefreshKeys(dlg);
                     RefreshList(dlg);
-                    return TRUE;
-
-                case IDC_KEYS:
-                    MessageBoxW(dlg, DescribeKeys().c_str(), L"Вставленные ключи",
-                                MB_OK | MB_ICONINFORMATION);
                     return TRUE;
 
                 case IDC_ENROLL:
                     if (DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_ENROLL), dlg,
-                                        EnrollProc, 0) == IDOK)
+                                        EnrollProc, 0) == IDOK) {
+                        RefreshKeys(dlg);
                         RefreshList(dlg);
+                    }
                     return TRUE;
 
                 case IDC_TEST: {
@@ -638,6 +880,7 @@ INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
                         return TRUE;
 
                     const auto status = enrollment::RemoveBySid(acc.sid);
+                    RefreshKeys(dlg);
                     RefreshList(dlg);
                     if (!status.ok) SetStatus(dlg, IDC_STATUS, status.error);
                     return TRUE;

@@ -78,6 +78,18 @@ Bytes Enroll(const std::string& path, const std::string& pin,
 Bytes GetHmacSecret(const std::string& path, const std::string& pin,
                     const Bytes& credId, const Bytes& salt);
 
+// Whether a key holds a given credential, asked without a touch.
+//
+// Answering needs an assertion with user presence switched off, which CTAP2
+// allows outright and CTAP1 answers through its check-only control byte. Not
+// every key or driver honours that, so the third value is not a formality:
+// "could not tell" must not be shown as "not registered".
+enum class Held { Yes, No, Unknown };
+
+// Silent: never prompts, never waits for a touch. `u2f` selects the protocol
+// to ask over, which must match how the credential was created.
+Held HoldsCredential(const std::string& path, const Bytes& credId, bool u2f);
+
 // True if the device requires/holds a client PIN (used to prompt correctly).
 bool HasClientPin(const std::string& path);
 
