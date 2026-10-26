@@ -110,6 +110,51 @@ bool ChooseDevice(std::string& path)
     return true;
 }
 
+// Prints what each connected key can do. The first thing to run when
+// enrollment refuses a key.
+int DoKeys()
+{
+    const auto keys = token::ProbeAll();
+    if (keys.empty()) {
+        Print(L"Ключи не найдены. Вставьте ключ и повторите.");
+        return 0;
+    }
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& k = keys[i];
+        std::wstring label = Utf8ToWide(k.manufacturer + " " + k.product);
+        Print(L"[" + std::to_wstring(i) + L"] " + label);
+
+        if (k.probeFailed) {
+            Print(L"    опросить не удалось: " + Utf8ToWide(k.probeError));
+            Print(L"");
+            continue;
+        }
+
+        Print(std::wstring(L"    протокол:    ") +
+              (k.isFido2 ? L"CTAP2 (FIDO2)" : L"только U2F (CTAP1)"));
+        if (!k.versions.empty()) {
+            std::wstring v;
+            for (const auto& s : k.versions) {
+                if (!v.empty()) v += L", ";
+                v += Utf8ToWide(s);
+            }
+            Print(L"    версии:      " + v);
+        }
+        Print(std::wstring(L"    hmac-secret: ") + (k.hmacSecret ? L"есть" : L"нет"));
+        Print(std::wstring(L"    PIN:         ") +
+              (k.pinSet ? L"задан"
+                        : (k.clientPinSupported ? L"поддерживается, но не задан"
+                                                : L"не поддерживается")));
+        if (k.usable)
+            Print(L"    пригоден для регистрации.");
+        else
+            Print(L"    НЕ пригоден: " + Utf8ToWide(k.reason) + L".");
+        Print(L"");
+    }
+    return 0;
+}
+
 int DoList()
 {
     const auto accounts = enrollment::Enrolled();
@@ -216,6 +261,7 @@ int wmain(int argc, wchar_t** argv)
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--list") mode = L"list";
+        else if (a == L"--keys") mode = L"keys";
         else if (a == L"--remove" && i + 1 < argc) { mode = L"remove"; account = argv[++i]; }
         else if (a == L"--test" && i + 1 < argc) { mode = L"test"; account = argv[++i]; }
         else if (a == L"--account" && i + 1 < argc) { account = argv[++i]; }
@@ -224,6 +270,7 @@ int wmain(int argc, wchar_t** argv)
             Print(L"  enroll                 регистрация текущего пользователя");
             Print(L"  enroll --account ИМЯ   регистрация указанной учётной записи");
             Print(L"  enroll --list          список зарегистрированных");
+            Print(L"  enroll --keys          что умеют вставленные ключи");
             Print(L"  enroll --test ИМЯ      проверить регистрацию");
             Print(L"  enroll --remove ИМЯ    удалить регистрацию");
             Print(L"");
@@ -232,13 +279,14 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
-    if (mode != L"list" && !IsElevated()) {
+    if (mode != L"list" && mode != L"keys" && !IsElevated()) {
         Err(L"Требуются права администратора. Запустите от имени администратора.");
         return 1;
     }
 
     try {
         if (mode == L"list") return DoList();
+        if (mode == L"keys") return DoKeys();
         if (mode == L"remove") return DoRemove(account);
         if (mode == L"test") return DoTest(account);
         if (account.empty()) account = CurrentUserName();
