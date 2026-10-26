@@ -41,11 +41,12 @@ Outcome Fido2(const VaultRecord& rec, const std::string& devicePath,
     return o;
 }
 
-Outcome U2f(const VaultRecord& rec, const std::string& devicePath)
+Outcome U2f(const VaultRecord& rec, const std::string& devicePath,
+            int timeoutMs)
 {
     uint32_t counter = 0;
     try {
-        counter = token::AssertU2f(devicePath, rec.credId, rec.pubKey);
+        counter = token::AssertU2f(devicePath, rec.credId, rec.pubKey, timeoutMs);
     } catch (const Fido2Error& e) {
         return Fail(Utf8ToWide(e.what()), true);
     }
@@ -74,10 +75,11 @@ Outcome U2f(const VaultRecord& rec, const std::string& devicePath)
 }  // namespace
 
 Outcome WithDevice(const VaultRecord& rec, const std::string& devicePath,
-                   const std::string& pin)
+                   const std::string& pin, int timeoutMs)
 {
     try {
-        if (rec.mode == VaultMode::U2fPresence) return U2f(rec, devicePath);
+        if (rec.mode == VaultMode::U2fPresence)
+            return U2f(rec, devicePath, timeoutMs);
         return Fido2(rec, devicePath, pin);
     } catch (const std::exception& e) {
         return Fail(Utf8ToWide(e.what()));

@@ -115,7 +115,13 @@ U2fCredential EnrollU2f(const std::string& path, const Bytes& userId,
 // key's signature counter, which the caller should check moves forward --
 // a counter that goes backwards suggests a cloned key. Requires a touch.
 // Throws Fido2Error if the key refuses or the signature does not verify.
+//
+// `timeoutMs` of 0 means the default, which is long enough for someone to
+// press a button. Pass something short to find out quickly whether a key is
+// already willing -- a key with no button only is in the seconds right after
+// it was plugged in, and waiting out the full timeout to learn otherwise is
+// what makes a logon screen look frozen.
 uint32_t AssertU2f(const std::string& path, const Bytes& keyHandle,
-                   const Bytes& pubKey);
+                   const Bytes& pubKey, int timeoutMs = 0);
 
 }  // namespace token

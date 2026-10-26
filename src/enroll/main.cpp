@@ -86,6 +86,29 @@ void ShowStep(enrollment::Step s)
     }
 }
 
+// Asks for the next presence event on the console. A key with a button can
+// just be touched while the operation runs; a key without one has to be taken
+// out and put back, because registering already used up the presence it gave
+// when it was plugged in.
+std::string WaitForKeyAgain(const std::string& currentPath)
+{
+    Print(L"");
+    Print(L"Нужно второе подтверждение на ключе.");
+    Print(L"Извлеките ключ и вставьте его снова (ключ с кнопкой можно оставить");
+    Print(L"на месте), затем нажмите Enter.");
+    ReadLine(L"> ");
+
+    auto devices = token::ListDevices();
+    if (devices.empty()) {
+        Err(L"Ключ не найден.");
+        return std::string();
+    }
+    // A re-plugged key can come back under a different path.
+    for (const auto& d : devices)
+        if (d.path == currentPath) return currentPath;
+    return devices[0].path;
+}
+
 // Picks a key, prompting only when there is more than one.
 bool ChooseDevice(std::string& path)
 {
@@ -266,8 +289,8 @@ int DoEnroll(const std::wstring& account, VaultMode mode)
         return 2;
     }
 
-    const auto status =
-        enrollment::Enroll(account, path, pin, password, mode, ShowStep);
+    const auto status = enrollment::Enroll(account, path, pin, password, mode,
+                                           ShowStep, WaitForKeyAgain);
     SecureClear(pin);
     SecureClear(password);
 

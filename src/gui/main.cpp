@@ -27,6 +27,7 @@ namespace {
 // Posted by a worker to the dialog that started it.
 constexpr UINT WM_JOB_PROGRESS = WM_APP + 1;  // wParam = enrollment::Step
 constexpr UINT WM_JOB_DONE = WM_APP + 2;      // lParam = enrollment::Status*
+constexpr UINT WM_JOB_NEEDKEY = WM_APP + 3;   // worker is waiting for a re-plug
 
 HINSTANCE g_inst = nullptr;
 
@@ -224,11 +225,31 @@ struct ConfirmParams {
     enrollment::Status status;  // out
 };
 
+// Handshake between the worker and the dialog for "I need the key touched
+// again". Shared, so a worker left waiting when the dialog goes away still has
+// a valid event to be released on.
+struct KeyHandshake {
+    HANDLE evt = nullptr;
+    std::string path;  // written by the dialog, read by the worker
+
+    ~KeyHandshake()
+    {
+        if (evt) CloseHandle(evt);
+    }
+};
+
+enum class Phase {
+    WaitingToStart,    // no operation yet; an arriving key starts one
+    Running,           // the worker owns the key
+    WaitingForReplug,  // the worker asked for another presence event
+};
+
 struct ConfirmState {
     ConfirmParams* p = nullptr;
     HBITMAP bmp = nullptr;
-    std::set<std::string> baseline;  // keys already present when we opened
-    bool running = false;
+    std::set<std::string> baseline;  // keys present as of the last wait
+    Phase phase = Phase::WaitingToStart;
+    std::shared_ptr<KeyHandshake> hs;
 };
 
 std::set<std::string> CurrentPaths()
@@ -239,6 +260,20 @@ std::set<std::string> CurrentPaths()
     } catch (const std::exception&) {
     }
     return paths;
+}
+
+// Second and later presence events: the key has to come out and go back in,
+// because registering already used up the one it gave on insertion.
+void ShowReplugText(HWND dlg)
+{
+    SetStatus(dlg, IDC_CTITLE, L"Вставьте ключ ещё раз");
+    SetStatus(dlg, IDC_CTEXT,
+              L"Нужно второе подтверждение на ключе — контрольная проверка "
+              L"перед сохранением.\n\n"
+              L"Извлеките ключ и вставьте его снова. Регистрация продолжится "
+              L"сама и не начнётся заново.\n\n"
+              L"Если на ключе есть кнопка — можно нажать «Использовать "
+              L"вставленный ключ».");
 }
 
 void ShowWaitingText(HWND dlg, bool anyPresent)
@@ -260,10 +295,44 @@ void ShowWaitingText(HWND dlg, bool anyPresent)
               L"Если на ключе есть кнопка — коснитесь её, когда он замигает.");
 }
 
+// Puts the dialog back into a waiting state, whichever one applies.
+void EnterWait(HWND dlg, ConfirmState* st, Phase phase)
+{
+    st->phase = phase;
+    st->baseline = CurrentPaths();
+    if (phase == Phase::WaitingForReplug)
+        ShowReplugText(dlg);
+    else
+        ShowWaitingText(dlg, !st->baseline.empty());
+    EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
+                 st->baseline.empty() ? FALSE : TRUE);
+    EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
+    SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+}
+
+// Releases a worker that is blocked asking for another presence event. An
+// empty path tells it to give up.
+void ResumeWorker(HWND dlg, ConfirmState* st, const std::string& path)
+{
+    if (!st || st->phase != Phase::WaitingForReplug) return;
+
+    KillTimer(dlg, kArrivalTimer);
+    st->phase = Phase::Running;
+    EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT), FALSE);
+    EnableWindow(GetDlgItem(dlg, IDCANCEL), FALSE);
+    SetStatus(dlg, IDC_CTITLE, L"Работа с ключом");
+    SetStatus(dlg, IDC_CTEXT, L"Не извлекайте ключ.");
+    SetStatus(dlg, IDC_CSTATUS,
+              path.empty() ? L"Отмена…" : L"Ключ получен, продолжаем…");
+
+    st->hs->path = path;
+    SetEvent(st->hs->evt);
+}
+
 void StartKeyJob(HWND dlg, ConfirmState* st, const std::string& path)
 {
-    if (!st || st->running) return;
-    st->running = true;
+    if (!st || st->phase != Phase::WaitingToStart) return;
+    st->phase = Phase::Running;
     KillTimer(dlg, kArrivalTimer);
 
     EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT), FALSE);
@@ -280,13 +349,23 @@ void StartKeyJob(HWND dlg, ConfirmState* st, const std::string& path)
     std::string pin = p->pin;
     std::wstring password = p->password;
 
+    auto hs = st->hs;
     const bool started = StartJob(
-        dlg, [account, path, pin, password, mode, isTest](
+        dlg, [dlg, hs, account, path, pin, password, mode, isTest](
                  const enrollment::ProgressFn& progress) mutable {
+            // Blocks this worker until the dialog has a key for us again.
+            enrollment::NeedKeyFn needKey =
+                [dlg, hs](const std::string&) -> std::string {
+                hs->path.clear();
+                PostMessageW(dlg, WM_JOB_NEEDKEY, 0, 0);
+                WaitForSingleObject(hs->evt, INFINITE);
+                return hs->path;
+            };
+
             auto result =
                 isTest ? enrollment::Test(account, path, pin, progress)
                        : enrollment::Enroll(account, path, pin, password, mode,
-                                            progress);
+                                            progress, needKey);
             SecureClear(pin);
             SecureClear(password);
             return result;
@@ -295,10 +374,8 @@ void StartKeyJob(HWND dlg, ConfirmState* st, const std::string& path)
     SecureClear(password);
 
     if (!started) {
-        st->running = false;
-        EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
         SetStatus(dlg, IDC_CSTATUS, L"Не удалось запустить операцию.");
-        SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+        EnterWait(dlg, st, Phase::WaitingToStart);
     }
 }
 
@@ -320,16 +397,19 @@ INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             SetWindowTextW(dlg, st->p->isTest ? L"Проверка ключа"
                                               : L"Регистрация ключа");
 
-            st->baseline = CurrentPaths();
-            ShowWaitingText(dlg, !st->baseline.empty());
-            EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
-                         st->baseline.empty() ? FALSE : TRUE);
-            SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+            st->hs = std::make_shared<KeyHandshake>();
+            st->hs->evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            EnterWait(dlg, st, Phase::WaitingToStart);
             return TRUE;
         }
 
+        case WM_JOB_NEEDKEY:
+            // The worker reached a step that needs the key touched again.
+            if (st) EnterWait(dlg, st, Phase::WaitingForReplug);
+            return TRUE;
+
         case WM_TIMER: {
-            if (!st || st->running) return TRUE;
+            if (!st || st->phase == Phase::Running) return TRUE;
             const std::set<std::string> now = CurrentPaths();
 
             // A key that was not there a moment ago has just been plugged in:
@@ -337,13 +417,16 @@ INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             // operation, so take it immediately.
             for (const auto& path : now) {
                 if (st->baseline.count(path) == 0) {
-                    StartKeyJob(dlg, st, path);
+                    if (st->phase == Phase::WaitingForReplug)
+                        ResumeWorker(dlg, st, path);
+                    else
+                        StartKeyJob(dlg, st, path);
                     return TRUE;
                 }
             }
 
-            // Keys removed since we opened can be inserted again to trigger
-            // the branch above.
+            // Keys removed since the last look can be inserted again to
+            // trigger the branch above.
             st->baseline = now;
             EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
                          now.empty() ? FALSE : TRUE);
@@ -357,7 +440,6 @@ INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case WM_JOB_DONE: {
             std::unique_ptr<enrollment::Status> status((enrollment::Status*)lp);
             if (!st) return TRUE;
-            st->running = false;
 
             if (status->ok) {
                 st->p->status = *status;
@@ -369,19 +451,14 @@ INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             // the fix is simply to plug the key in again. Keep waiting.
             st->p->status = *status;
             SetStatus(dlg, IDC_CSTATUS, status->error);
-            st->baseline = CurrentPaths();
-            ShowWaitingText(dlg, !st->baseline.empty());
-            EnableWindow(GetDlgItem(dlg, IDC_USEPRESENT),
-                         st->baseline.empty() ? FALSE : TRUE);
-            EnableWindow(GetDlgItem(dlg, IDCANCEL), TRUE);
-            SetTimer(dlg, kArrivalTimer, kArrivalPollMs, nullptr);
+            EnterWait(dlg, st, Phase::WaitingToStart);
             return TRUE;
         }
 
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDC_USEPRESENT: {
-                    if (!st || st->running) return TRUE;
+                    if (!st || st->phase == Phase::Running) return TRUE;
                     const std::set<std::string> now = CurrentPaths();
                     if (now.empty()) {
                         SetStatus(dlg, IDC_CSTATUS, L"Ключ не найден.");
@@ -392,12 +469,22 @@ INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     const std::string path =
                         now.count(st->p->preferredPath) ? st->p->preferredPath
                                                         : *now.begin();
-                    StartKeyJob(dlg, st, path);
+                    if (st->phase == Phase::WaitingForReplug)
+                        ResumeWorker(dlg, st, path);
+                    else
+                        StartKeyJob(dlg, st, path);
                     return TRUE;
                 }
 
                 case IDCANCEL:
-                    if (st && st->running) return TRUE;
+                    if (!st) return TRUE;
+                    // Cancelling mid-wait releases the worker, which then
+                    // reports the operation as abandoned.
+                    if (st->phase == Phase::WaitingForReplug) {
+                        ResumeWorker(dlg, st, std::string());
+                        return TRUE;
+                    }
+                    if (st->phase == Phase::Running) return TRUE;
                     EndDialog(dlg, IDCANCEL);
                     return TRUE;
             }
@@ -406,6 +493,12 @@ INT_PTR CALLBACK ConfirmProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case WM_DESTROY:
             if (st) {
                 KillTimer(dlg, kArrivalTimer);
+                // Never leave a worker blocked on a window that is gone; the
+                // handshake outlives the dialog precisely for this.
+                if (st->hs) {
+                    st->hs->path.clear();
+                    SetEvent(st->hs->evt);
+                }
                 if (st->bmp) DeleteObject(st->bmp);
                 delete st;
                 SetWindowLongPtrW(dlg, GWLP_USERDATA, 0);

@@ -325,7 +325,7 @@ U2fCredential EnrollU2f(const std::string& path, const Bytes& userId,
 }
 
 uint32_t AssertU2f(const std::string& path, const Bytes& keyHandle,
-                   const Bytes& pubKey)
+                   const Bytes& pubKey, int timeoutMs)
 {
     if (keyHandle.empty()) throw Fido2Error("AssertU2f: empty key handle");
     if (pubKey.empty()) throw Fido2Error("AssertU2f: empty public key");
@@ -334,7 +334,7 @@ uint32_t AssertU2f(const std::string& path, const Bytes& keyHandle,
     DevHandle h;
     OpenDeviceAnyProtocol(h, path);
     fido_dev_force_u2f(h.dev);
-    fido_dev_set_timeout(h.dev, kTouchTimeoutMs);
+    fido_dev_set_timeout(h.dev, timeoutMs > 0 ? timeoutMs : kTouchTimeoutMs);
 
     fido_assert_t* assert = fido_assert_new();
     if (!assert) throw Fido2Error("fido_assert_new failed");

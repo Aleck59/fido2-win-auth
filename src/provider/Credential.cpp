@@ -10,6 +10,31 @@
 
 #include <strsafe.h>
 
+#include <set>
+
+namespace {
+
+// How long to ask an already-attached U2F key whether it will answer now.
+// Long enough for a key that already holds user presence, short enough that
+// learning otherwise is not a visible stall.
+constexpr int kU2fProbeTimeoutMs = 2500;
+
+// How often to look for a key being plugged in, and how long to keep looking.
+constexpr DWORD kArrivalPollMs = 500;
+constexpr DWORD kArrivalGiveUpMs = 120000;
+
+std::set<std::string> AttachedPaths()
+{
+    std::set<std::string> paths;
+    try {
+        for (const auto& d : token::ListDevices()) paths.insert(d.path);
+    } catch (const std::exception&) {
+    }
+    return paths;
+}
+
+}  // namespace
+
 CFido2Credential::CFido2Credential()
     : ref_(1), cpus_(CPUS_INVALID), events_(nullptr), unlocked_(false),
       mode_(VaultMode::Fido2HmacSecret), haveMode_(false)
@@ -220,6 +245,56 @@ void CFido2Credential::ClearSecrets()
 // the hmac-secret and decrypts the password. LogonUI runs this on a worker
 // thread, so waiting for a touch here does not freeze the logon screen, and it
 // can show progress while we wait.
+unlock::Outcome CFido2Credential::WaitForU2fKey(const VaultRecord& rec,
+                                                IQueryContinueWithStatus* qcws,
+                                                std::wstring& lastError)
+{
+    unlock::Outcome out;
+    std::set<std::string> baseline = AttachedPaths();
+
+    // Only the IQueryContinueWithStatus channel is touched from here: this
+    // runs on LogonUI's worker thread, and the field-events interface belongs
+    // to its UI thread.
+    const wchar_t* waiting =
+        baseline.empty() ? L"Вставьте ключ безопасности…"
+                         : L"Извлеките ключ и вставьте его снова…";
+    if (qcws) qcws->SetStatusMessage(waiting);
+
+    const DWORD start = GetTickCount();
+    for (;;) {
+        if (qcws && qcws->QueryContinue() != S_OK) {
+            lastError = L"Отменено.";
+            return out;
+        }
+        if (GetTickCount() - start > kArrivalGiveUpMs) {
+            lastError = L"Ключ так и не был подключён. Повторите вход.";
+            return out;
+        }
+
+        Sleep(kArrivalPollMs);
+        const std::set<std::string> now = AttachedPaths();
+
+        for (const auto& path : now) {
+            if (baseline.count(path)) continue;
+
+            // Just plugged in: this is the moment a button-less key will
+            // answer, and the moment a key with a button starts asking to be
+            // touched. The full timeout applies here on purpose.
+            if (qcws) qcws->SetStatusMessage(L"Ключ обнаружен, проверяем…");
+            out = unlock::WithDevice(rec, path, std::string());
+            if (out.ok) return out;
+
+            lastError = out.error;
+            // A verdict that will not change on another insertion.
+            if (!out.wrongKey) return out;
+
+            if (qcws)
+                qcws->SetStatusMessage(L"Этот ключ не подошёл. Вставьте нужный ключ…");
+        }
+        baseline = now;
+    }
+}
+
 IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
 {
     SecureClear(password_);
@@ -244,7 +319,7 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
     if (qcws) qcws->SetStatusMessage(L"Поиск ключа безопасности...");
 
     auto devices = token::ListDevices();
-    if (devices.empty()) {
+    if (devices.empty() && rec.mode != VaultMode::U2fPresence) {
         Fail(L"Вставьте ключ безопасности и повторите.");
         return S_OK;
     }
@@ -253,7 +328,10 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
         Fail(L"Отменено.");
         return S_OK;
     }
-    if (qcws) qcws->SetStatusMessage(L"Коснитесь ключа безопасности...");
+    if (qcws)
+        qcws->SetStatusMessage(rec.mode == VaultMode::U2fPresence
+                                   ? L"Проверяем подключённые ключи…"
+                                   : L"Коснитесь ключа безопасности…");
 
     std::string pinUtf8;
     {
