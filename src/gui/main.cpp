@@ -129,12 +129,65 @@ std::vector<std::string> FillDeviceCombo(HWND dlg, int id)
     return paths;
 }
 
+// One line about a key, for the label under the device picker.
+std::wstring ShortCapabilities(const token::Capabilities& c)
+{
+    if (c.probeFailed) return L"опросить ключ не удалось";
+    if (c.usable) return L"CTAP2, hmac-secret есть, PIN задан — подходит";
+    return L"не подходит: " + Utf8ToWide(c.reason);
+}
+
+// The full report, for the "Ключи…" button.
+std::wstring DescribeKeys()
+{
+    const auto keys = token::ProbeAll();
+    if (keys.empty())
+        return L"Ключи не найдены. Вставьте ключ и нажмите «Ключи…» ещё раз.";
+
+    std::wstring text;
+    for (const auto& k : keys) {
+        if (!text.empty()) text += L"\n";
+        std::wstring label = Utf8ToWide(k.manufacturer + " " + k.product);
+        text += label.empty() ? L"(безымянный ключ)" : label;
+        text += L"\n";
+
+        if (k.probeFailed) {
+            text += L"    опросить не удалось: " + Utf8ToWide(k.probeError) + L"\n";
+            continue;
+        }
+
+        text += std::wstring(L"    протокол: ") +
+                (k.isFido2 ? L"CTAP2 (FIDO2)" : L"только U2F (CTAP1)") + L"\n";
+        text += std::wstring(L"    hmac-secret: ") +
+                (k.hmacSecret ? L"есть" : L"нет") + L"\n";
+        text += std::wstring(L"    PIN: ") +
+                (k.pinSet ? L"задан"
+                          : (k.clientPinSupported ? L"поддерживается, но не задан"
+                                                  : L"не поддерживается")) + L"\n";
+        text += k.usable ? L"    Пригоден для регистрации.\n"
+                         : L"    НЕ пригоден: " + Utf8ToWide(k.reason) + L".\n";
+    }
+    return text;
+}
+
 // ---------------------------------------------------------------- enroll ---
 
 struct EnrollState {
     std::vector<std::string> devicePaths;
     bool running = false;
 };
+
+void ShowSelectedDevice(HWND dlg, EnrollState* st)
+{
+    if (!st) return;
+    const LRESULT idx = SendMessageW(GetDlgItem(dlg, IDC_DEVICE), CB_GETCURSEL, 0, 0);
+    if (idx == CB_ERR || (size_t)idx >= st->devicePaths.size()) {
+        SetStatus(dlg, IDC_DEVINFO, L"");
+        return;
+    }
+    SetStatus(dlg, IDC_DEVINFO,
+              ShortCapabilities(token::Probe(st->devicePaths[(size_t)idx])));
+}
 
 INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -168,6 +221,7 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (st->devicePaths.empty())
                 SetStatus(dlg, IDC_ESTATUS, L"Ключ не найден. Вставьте ключ и "
                                             L"откройте это окно заново.");
+            ShowSelectedDevice(dlg, st);
             return TRUE;
         }
 
@@ -195,6 +249,10 @@ INT_PTR CALLBACK EnrollProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         case WM_COMMAND:
+            if (LOWORD(wp) == IDC_DEVICE && HIWORD(wp) == CBN_SELCHANGE) {
+                ShowSelectedDevice(dlg, st);
+                return TRUE;
+            }
             switch (LOWORD(wp)) {
                 case IDOK: {
                     if (!st || st->running) return TRUE;
@@ -469,6 +527,11 @@ INT_PTR CALLBACK MainProc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
             switch (LOWORD(wp)) {
                 case IDC_REFRESH:
                     RefreshList(dlg);
+                    return TRUE;
+
+                case IDC_KEYS:
+                    MessageBoxW(dlg, DescribeKeys().c_str(), L"Вставленные ключи",
+                                MB_OK | MB_ICONINFORMATION);
                     return TRUE;
 
                 case IDC_ENROLL:

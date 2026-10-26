@@ -16,8 +16,9 @@ BEGIN
                     LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER |
                     WS_TABSTOP, 10, 22, 320, 110
     PUSHBUTTON      "Зарегистрировать…", IDC_ENROLL, 10, 140, 86, 16
-    PUSHBUTTON      "Проверить…", IDC_TEST, 102, 140, 68, 16
-    PUSHBUTTON      "Удалить", IDC_REMOVE, 176, 140, 60, 16
+    PUSHBUTTON      "Проверить…", IDC_TEST, 100, 140, 62, 16
+    PUSHBUTTON      "Удалить", IDC_REMOVE, 166, 140, 50, 16
+    PUSHBUTTON      "Ключи…", IDC_KEYS, 220, 140, 46, 16
     PUSHBUTTON      "Обновить", IDC_REFRESH, 270, 140, 60, 16
     LTEXT           "", IDC_STATUS, 10, 164, 320, 20
     LTEXT           "Держите запасной способ входа: пароль администратора или второй ключ.",
@@ -34,12 +35,13 @@ BEGIN
     COMBOBOX        IDC_ACCOUNT, 86, 10, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Ключ:", -1, 10, 32, 70, 10
     COMBOBOX        IDC_DEVICE, 86, 30, 194, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "PIN ключа:", -1, 10, 54, 70, 10
-    EDITTEXT        IDC_EPIN, 86, 52, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "Пароль Windows:", -1, 10, 74, 70, 10
-    EDITTEXT        IDC_PW1, 86, 72, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
-    LTEXT           "Повторите пароль:", -1, 10, 94, 74, 10
-    EDITTEXT        IDC_PW2, 86, 92, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "PIN ключа:", -1, 10, 60, 70, 10
+    EDITTEXT        IDC_EPIN, 86, 58, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Пароль Windows:", -1, 10, 80, 70, 10
+    EDITTEXT        IDC_PW1, 86, 78, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Повторите пароль:", -1, 10, 100, 74, 10
+    EDITTEXT        IDC_PW2, 86, 98, 194, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_DEVINFO, 86, 46, 194, 9
     LTEXT           "Потребуется трижды коснуться ключа: создание, получение секрета и контрольная проверка.",
                     IDC_HINT, 10, 114, 270, 18
     LTEXT           "", IDC_ESTATUS, 10, 136, 270, 26

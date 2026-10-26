@@ -11,6 +11,7 @@
 #define IDC_REMOVE   1003
 #define IDC_REFRESH  1004
 #define IDC_STATUS   1005
+#define IDC_KEYS     1006
 
 #define IDC_ACCOUNT  1010
 #define IDC_DEVICE   1011
@@ -19,6 +20,7 @@
 #define IDC_PW2      1014
 #define IDC_ESTATUS  1015
 #define IDC_HINT     1016
+#define IDC_DEVINFO  1017
 
 #define IDC_KDEVICE  1020
 #define IDC_KPIN     1021

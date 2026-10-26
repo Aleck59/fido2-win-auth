@@ -74,6 +74,98 @@ std::vector<Device> ListDevices()
     return out;
 }
 
+namespace {
+
+// Collects the strings out of a libfido2 string array.
+std::vector<std::string> CollectStrings(char* const* ptr, size_t len)
+{
+    std::vector<std::string> out;
+    for (size_t i = 0; i < len; ++i)
+        if (ptr[i]) out.push_back(ptr[i]);
+    return out;
+}
+
+}  // namespace
+
+Capabilities Probe(const std::string& path)
+{
+    fido_init(0);
+
+    Capabilities c;
+    c.path = path;
+
+    // Deliberately not OpenDevice(): that rejects a CTAP1-only key, and such a
+    // key is exactly what this function exists to describe.
+    DevHandle h;
+    h.dev = fido_dev_new();
+    if (!h.dev) {
+        c.probeFailed = true;
+        c.probeError = "fido_dev_new failed";
+        return c;
+    }
+    int r = fido_dev_open(h.dev, path.c_str());
+    if (r != FIDO_OK) {
+        c.probeFailed = true;
+        c.probeError = std::string("fido_dev_open: ") + fido_strerr(r);
+        return c;
+    }
+
+    c.isFido2 = fido_dev_is_fido2(h.dev);
+    c.pinSet = fido_dev_has_pin(h.dev);
+
+    if (c.isFido2) {
+        fido_cbor_info_t* info = fido_cbor_info_new();
+        if (info) {
+            if (fido_dev_get_cbor_info(h.dev, info) == FIDO_OK) {
+                c.versions = CollectStrings(fido_cbor_info_versions_ptr(info),
+                                            fido_cbor_info_versions_len(info));
+                c.extensions = CollectStrings(fido_cbor_info_extensions_ptr(info),
+                                              fido_cbor_info_extensions_len(info));
+                for (const auto& e : c.extensions)
+                    if (e == "hmac-secret") c.hmacSecret = true;
+
+                char* const* names = fido_cbor_info_options_name_ptr(info);
+                const bool* values = fido_cbor_info_options_value_ptr(info);
+                const size_t n = fido_cbor_info_options_len(info);
+                for (size_t i = 0; i < n; ++i) {
+                    if (!names[i]) continue;
+                    if (std::strcmp(names[i], "clientPin") == 0) {
+                        c.clientPinSupported = true;
+                        // The option's value doubles as "a PIN is set".
+                        c.pinSet = c.pinSet || values[i];
+                    }
+                }
+            }
+            fido_cbor_info_free(&info);
+        }
+    }
+
+    // Decide usability in one place, so the UI never has to reason about it.
+    if (!c.isFido2) {
+        c.reason = "ключ отвечает только по U2F (CTAP1): расширений в этом "
+                   "протоколе нет, поэтому hmac-secret недоступен";
+    } else if (!c.hmacSecret) {
+        c.reason = "ключ не поддерживает расширение hmac-secret";
+    } else if (!c.pinSet) {
+        c.reason = "на ключе не задан PIN";
+    } else {
+        c.usable = true;
+    }
+    return c;
+}
+
+std::vector<Capabilities> ProbeAll()
+{
+    std::vector<Capabilities> out;
+    for (const auto& d : ListDevices()) {
+        Capabilities c = Probe(d.path);
+        c.product = d.product;
+        c.manufacturer = d.manufacturer;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
 bool HasClientPin(const std::string& path)
 {
     fido_init(0);
