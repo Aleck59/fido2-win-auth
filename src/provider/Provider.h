@@ -45,8 +45,22 @@ private:
     void ReleaseCredentials();
     HRESULT CreateCredentials();
 
+    // Watches for a key being plugged in and asks LogonUI to re-enumerate, so
+    // that inserting the key can log the user in without them first picking
+    // this sign-in option. See Provider.cpp for why it only arms for U2F.
+    void StartMonitor();
+    void StopMonitor();
+    void MonitorLoop();
+    static DWORD WINAPI MonitorProc(LPVOID param);
+
     LONG ref_;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus_;
     ICredentialProviderUserArray* userArray_;
     std::vector<CFido2Credential*> credentials_;
+
+    ICredentialProviderEvents* events_;
+    UINT_PTR adviseContext_;
+    HANDLE monitorThread_;
+    HANDLE monitorStop_;
+    LONG keyArrived_;  // set by the monitor, consumed by GetCredentialCount
 };
