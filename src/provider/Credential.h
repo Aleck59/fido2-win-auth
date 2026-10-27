@@ -108,6 +108,7 @@ private:
     std::wstring domain_;
     std::wstring user_;
     std::wstring displayLabel_;
+    std::wstring initialStatus_;  // what the tile says before anything happens
 
     PWSTR fieldStrings_[FI_NUM_FIELDS];  // CoTaskMem-owned per-field strings
     std::wstring pin_;                   // the key PIN typed into FI_PIN

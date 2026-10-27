@@ -12,6 +12,7 @@
 // Must run elevated (writes under HKLM with a SYSTEM/Administrators DACL).
 #include "../common/bytes.h"
 #include "../common/enrollment.h"
+#include "../common/plog.h"
 #include "../common/token.h"
 #include "../common/vault.h"
 
@@ -179,6 +180,30 @@ int DoKeys()
     return 0;
 }
 
+// The credential provider runs inside LogonUI with no console and no window,
+// so when the logon screen misbehaves this log is the only way to see where it
+// stopped. It records steps and the messages the tile shows -- never a
+// password, a PIN or any key material.
+int DoDebug(const std::wstring& arg)
+{
+    if (arg == L"on" || arg == L"off") {
+        if (!plog::SetEnabled(arg == L"on")) {
+            Err(L"Не удалось изменить настройку (нужны права администратора).");
+            return 2;
+        }
+    } else if (!arg.empty()) {
+        Err(L"Укажите on или off.");
+        return 2;
+    }
+
+    Print(std::wstring(L"Журнал провайдера: ") +
+          (plog::Enabled() ? L"включён" : L"выключен"));
+    Print(L"Файл: " + plog::Path());
+    if (plog::Enabled())
+        Print(L"Заблокируйте экран (Win+L), попробуйте вход, затем посмотрите файл.");
+    return 0;
+}
+
 int DoList()
 {
     const auto accounts = enrollment::Enrolled();
@@ -321,6 +346,11 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--remove" && i + 1 < argc) { mode = L"remove"; account = argv[++i]; }
         else if (a == L"--test" && i + 1 < argc) { mode = L"test"; account = argv[++i]; }
         else if (a == L"--u2f") vaultMode = VaultMode::U2fPresence;
+        else if (a == L"--debug") {
+            mode = L"debug";
+            if (i + 1 < argc) account = argv[++i];  // reuse as the on/off word
+            else account.clear();
+        }
         else if (a == L"--account" && i + 1 < argc) { account = argv[++i]; }
         else if (a == L"--help" || a == L"-h") {
             Print(L"Использование:");
@@ -330,6 +360,8 @@ int wmain(int argc, wchar_t** argv)
             Print(L"  enroll --keys          что умеют вставленные ключи");
             Print(L"  enroll --test ИМЯ      проверить регистрацию");
             Print(L"  enroll --remove ИМЯ    удалить регистрацию");
+            Print(L"  enroll --u2f           регистрация ключа U2F (СЛАБЕЕ, см. README)");
+            Print(L"  enroll --debug on|off  журнал провайдера для разбора входа");
             Print(L"");
             Print(L"То же самое в окне: fido2gui.exe");
             return 0;
@@ -344,6 +376,7 @@ int wmain(int argc, wchar_t** argv)
     try {
         if (mode == L"list") return DoList();
         if (mode == L"keys") return DoKeys();
+        if (mode == L"debug") return DoDebug(account);
         if (mode == L"remove") return DoRemove(account);
         if (mode == L"test") return DoTest(account);
         if (account.empty()) account = CurrentUserName();
