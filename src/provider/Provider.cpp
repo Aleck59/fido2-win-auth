@@ -81,6 +81,10 @@ IFACEMETHODIMP CFido2Provider::SetSerialization(
 // How often to look for a key appearing while the logon screen is up.
 constexpr DWORD kMonitorPollMs = 700;
 
+// Polls spent only learning which keys are already attached, before any
+// arrival is acted on.
+constexpr int kSettlePolls = 3;
+
 DWORD WINAPI CFido2Provider::MonitorProc(LPVOID param)
 {
     static_cast<CFido2Provider*>(param)->MonitorLoop();
@@ -90,6 +94,13 @@ DWORD WINAPI CFido2Provider::MonitorProc(LPVOID param)
 void CFido2Provider::MonitorLoop()
 {
     std::set<std::string> baseline = token::AttachedPaths();
+
+    // The HID bus is not necessarily enumerated yet when the logon screen
+    // appears, so the first answers can be empty and a key that was plugged in
+    // all along then looks like it has just arrived -- which logged the user
+    // straight back in the moment they locked the machine. Spend the first
+    // few polls only learning what is already there.
+    int settling = kSettlePolls;
 
     for (;;) {
         if (WaitForSingleObject(monitorStop_, kMonitorPollMs) == WAIT_OBJECT_0)
@@ -101,6 +112,10 @@ void CFido2Provider::MonitorLoop()
             if (baseline.count(path) == 0) arrived = true;
         baseline = now;
 
+        if (settling > 0) {
+            --settling;
+            continue;
+        }
         if (!arrived) continue;
 
         // Record the arrival and ask LogonUI to come back and ask again. The
@@ -263,6 +278,7 @@ IFACEMETHODIMP CFido2Provider::GetCredentialCount(DWORD* count, DWORD* defaultIn
     // PIN, so the tile is merely preselected.
     *autoLogonWithDefault =
         (credentials_[0]->IsU2f() && settings::AutoLogon()) ? TRUE : FALSE;
+    if (*autoLogonWithDefault) credentials_[0]->SetAutoTriggered();
 
     plog::Write(std::wstring(L"GetCredentialCount: плитка выбрана, автовход ") +
                 (*autoLogonWithDefault ? L"да" : L"нет"));

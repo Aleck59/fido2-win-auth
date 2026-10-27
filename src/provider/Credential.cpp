@@ -22,7 +22,7 @@ constexpr int kU2fProbeTimeoutMs = 2500;
 
 // How often to look for a key being plugged in, and how long to keep looking.
 constexpr DWORD kArrivalPollMs = 500;
-constexpr DWORD kArrivalGiveUpMs = 120000;
+constexpr DWORD kArrivalGiveUpMs = 60000;
 
 std::set<std::string> AttachedPaths()
 {
@@ -38,7 +38,7 @@ std::set<std::string> AttachedPaths()
 
 CFido2Credential::CFido2Credential()
     : ref_(1), cpus_(CPUS_INVALID), events_(nullptr), unlocked_(false),
-      mode_(VaultMode::Fido2HmacSecret), haveMode_(false)
+      autoTriggered_(false), mode_(VaultMode::Fido2HmacSecret), haveMode_(false)
 {
     DllAddRef();
     for (int i = 0; i < FI_NUM_FIELDS; ++i) fieldStrings_[i] = nullptr;
@@ -137,17 +137,15 @@ IFACEMETHODIMP CFido2Credential::UnAdvise()
 
 IFACEMETHODIMP CFido2Credential::SetSelected(BOOL* autoLogon)
 {
-    // A U2F tile has nothing to type: the PIN box is hidden because CTAP1 has
-    // no PIN. Starting as soon as the sign-in option is chosen is both what
-    // the user means by choosing it and the only way the key-arrival wait in
-    // Connect() ever gets a chance to run.
+    // Never submit merely because the tile became selected. Returning TRUE
+    // here traps the user: cancelling returns to the tile, the tile is still
+    // selected, and this fires again -- so the logon screen could not be used
+    // for anything else, including switching user.
     //
-    // This tile is never the default (the provider reports
-    // CREDENTIAL_PROVIDER_NO_DEFAULT), so this only fires on a deliberate
-    // selection, and QueryContinue lets the user back out.
-    *autoLogon = (haveMode_ && mode_ == VaultMode::U2fPresence) ? TRUE : FALSE;
-    plog::Write(std::wstring(L"SetSelected: autoLogon=") +
-                (*autoLogon ? L"TRUE" : L"FALSE"));
+    // Logging in on insertion is driven instead by the provider nominating
+    // this tile with pbAutoLogonWithDefault after a key actually arrives,
+    // which is a single event rather than a standing state.
+    *autoLogon = FALSE;
     return S_OK;
 }
 
@@ -318,7 +316,13 @@ unlock::Outcome CFido2Credential::WaitForU2fKey(const VaultRecord& rec,
 
 IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
 {
-    plog::Write(L"Connect: начало");
+    // Consume the flag up front: whatever happens, the next Connect() is a
+    // fresh decision.
+    const bool autoTriggered = autoTriggered_;
+    autoTriggered_ = false;
+
+    plog::Write(std::wstring(L"Connect: начало, источник ") +
+                (autoTriggered ? L"подключение ключа" : L"пользователь"));
     SecureClear(password_);
     unlocked_ = false;
     connectError_.clear();
@@ -408,7 +412,12 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
     // than a failure: wait for the key to be plugged in and run the assertion
     // at that moment, which is when a button-less key grants user presence and
     // when a key with a button starts asking to be touched.
-    if (!out.ok && u2f && !decided) {
+    // Only a logon the user asked for may wait. One that started by itself
+    // gives up quietly, so an unattended screen stays usable.
+    if (!out.ok && u2f && !decided && autoTriggered)
+        plog::Write(L"Connect: автоматический вход не удался, ожидание пропущено");
+
+    if (!out.ok && u2f && !decided && !autoTriggered) {
         plog::Write(L"Connect: ждём подключения ключа");
         out = WaitForU2fKey(rec, qcws, lastError);
         plog::Write(L"Connect: ожидание завершено -> " +

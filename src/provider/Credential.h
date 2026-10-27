@@ -66,6 +66,12 @@ public:
     // own: a FIDO2 record still wants a PIN typed.
     bool IsU2f() const { return haveMode_ && mode_ == VaultMode::U2fPresence; }
 
+    // Marks the next Connect() as started by a key arriving rather than by the
+    // user. Such a Connect must not sit waiting for a key: the key is already
+    // there, and if it will not answer, the screen has to come back rather
+    // than be held by a tile the user never chose.
+    void SetAutoTriggered() { autoTriggered_ = true; }
+
     HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
                        const std::wstring& sid, const std::wstring& domain,
                        const std::wstring& user);
@@ -117,6 +123,7 @@ private:
     std::wstring password_;
     std::wstring connectError_;
     bool unlocked_;
+    bool autoTriggered_;
 
     // Mode of this account's record, read once at Initialize(): a U2F record
     // has no PIN, so the PIN field is hidden for it.
