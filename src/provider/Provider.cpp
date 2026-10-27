@@ -1,6 +1,7 @@
 #include "Provider.h"
 
 #include "../common/plog.h"
+#include "../common/settings.h"
 #include "../common/store.h"
 #include "../common/token.h"
 #include "Credential.h"
@@ -79,24 +80,6 @@ IFACEMETHODIMP CFido2Provider::SetSerialization(
 
 // How often to look for a key appearing while the logon screen is up.
 constexpr DWORD kMonitorPollMs = 700;
-
-// Whether inserting a key may log the user in by itself. On by default for
-// U2F records, because such a record has nothing to type -- see the note in
-// GetCredentialCount for what that does and does not change.
-bool AutoLogonAllowed()
-{
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\fido2-win-auth", 0,
-                      KEY_READ, &key) != ERROR_SUCCESS)
-        return true;
-
-    DWORD value = 1, size = sizeof(value), type = 0;
-    const LONG rc = RegQueryValueExW(key, L"AutoLogon", nullptr, &type,
-                                     (BYTE*)&value, &size);
-    RegCloseKey(key);
-    if (rc != ERROR_SUCCESS || type != REG_DWORD) return true;
-    return value != 0;
-}
 
 DWORD WINAPI CFido2Provider::MonitorProc(LPVOID param)
 {
@@ -279,7 +262,7 @@ IFACEMETHODIMP CFido2Provider::GetCredentialCount(DWORD* count, DWORD* defaultIn
     // itself is already the whole credential. A FIDO2 record still wants its
     // PIN, so the tile is merely preselected.
     *autoLogonWithDefault =
-        (credentials_[0]->IsU2f() && AutoLogonAllowed()) ? TRUE : FALSE;
+        (credentials_[0]->IsU2f() && settings::AutoLogon()) ? TRUE : FALSE;
 
     plog::Write(std::wstring(L"GetCredentialCount: плитка выбрана, автовход ") +
                 (*autoLogonWithDefault ? L"да" : L"нет"));
