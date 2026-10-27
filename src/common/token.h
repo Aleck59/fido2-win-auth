@@ -6,6 +6,7 @@
 
 #include "bytes.h"
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,10 @@ struct Device {
 // Enumerates FIDO authenticators currently connected. Never throws for an
 // empty bus; returns an empty vector.
 std::vector<Device> ListDevices();
+
+// Just the paths, as a set, for spotting a key being plugged in: a path that
+// was not in the previous answer is an arrival. Never throws.
+std::set<std::string> AttachedPaths();
 
 // What a connected key can actually do.
 //

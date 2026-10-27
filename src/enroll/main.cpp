@@ -12,19 +12,53 @@
 // Must run elevated (writes under HKLM with a SYSTEM/Administrators DACL).
 #include "../common/bytes.h"
 #include "../common/enrollment.h"
+#include "../common/plog.h"
+#include "../common/settings.h"
 #include "../common/token.h"
 #include "../common/vault.h"
 
 #include <windows.h>
 
 #include <cstdio>
-#include <iostream>
 #include <string>
 
 namespace {
 
-void Print(const std::wstring& s) { std::wcout << s << L"\n"; }
-void Err(const std::wstring& s) { std::wcerr << s << L"\n"; }
+// Console I/O that survives non-ASCII.
+//
+// std::wcout with the default locale cannot convert anything outside the
+// narrow character set: the first Cyrillic character puts the stream in a
+// failed state and every later write is silently dropped, so the tool printed
+// nothing at all. std::wcin mangles the same characters on the way in, which
+// for a Windows password means storing the wrong one.
+//
+// So write through the console directly when there is one, and fall back to
+// UTF-8 bytes when the output is redirected -- which also makes a redirected
+// log readable.
+void WriteTo(DWORD stdHandle, const std::wstring& text)
+{
+    HANDLE h = GetStdHandle(stdHandle);
+    if (h == INVALID_HANDLE_VALUE || !h) return;
+
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode)) {
+        DWORD written = 0;
+        WriteConsoleW(h, text.c_str(), (DWORD)text.size(), &written, nullptr);
+        return;
+    }
+
+    const int cb = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(),
+                                       nullptr, 0, nullptr, nullptr);
+    if (cb <= 0) return;
+    std::string utf8((size_t)cb, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), &utf8[0], cb,
+                        nullptr, nullptr);
+    DWORD written = 0;
+    WriteFile(h, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
+}
+
+void Print(const std::wstring& s) { WriteTo(STD_OUTPUT_HANDLE, s + L"\r\n"); }
+void Err(const std::wstring& s) { WriteTo(STD_ERROR_HANDLE, s + L"\r\n"); }
 
 std::wstring CurrentUserName()
 {
@@ -34,26 +68,65 @@ std::wstring CurrentUserName()
     return L"";
 }
 
+// Reads one line. ReadConsoleW on a console keeps every character intact;
+// the redirected case decodes UTF-8 so a scripted answer works too.
+std::wstring ReadRawLine()
+{
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+
+    std::wstring line;
+    if (GetConsoleMode(in, &mode)) {
+        wchar_t buf[512];
+        DWORD read = 0;
+        if (ReadConsoleW(in, buf, ARRAYSIZE(buf), &read, nullptr))
+            line.assign(buf, read);
+        SecureZeroMemory(buf, sizeof(buf));
+    } else {
+        std::string bytes;
+        char c = 0;
+        DWORD read = 0;
+        while (ReadFile(in, &c, 1, &read, nullptr) && read == 1) {
+            if (c == '\n') break;
+            bytes.push_back(c);
+        }
+        if (!bytes.empty()) {
+            const int cch = MultiByteToWideChar(CP_UTF8, 0, bytes.data(),
+                                                (int)bytes.size(), nullptr, 0);
+            if (cch > 0) {
+                line.resize((size_t)cch);
+                MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(),
+                                    &line[0], cch);
+            }
+        }
+        SecureClear(bytes);
+    }
+
+    while (!line.empty() && (line.back() == L'\r' || line.back() == L'\n'))
+        line.pop_back();
+    return line;
+}
+
 std::wstring ReadLine(const std::wstring& prompt)
 {
-    std::wcout << prompt << std::flush;
-    std::wstring line;
-    std::getline(std::wcin, line);
-    return line;
+    WriteTo(STD_OUTPUT_HANDLE, prompt);
+    return ReadRawLine();
 }
 
 // Reads a secret from the console with echo disabled.
 std::wstring ReadSecret(const std::wstring& prompt)
 {
-    std::wcout << prompt << std::flush;
+    WriteTo(STD_OUTPUT_HANDLE, prompt);
+
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
-    GetConsoleMode(in, &mode);
-    SetConsoleMode(in, mode & ~(DWORD)ENABLE_ECHO_INPUT);
-    std::wstring line;
-    std::getline(std::wcin, line);
-    SetConsoleMode(in, mode);
-    std::wcout << L"\n";
+    const bool isConsole = GetConsoleMode(in, &mode) != 0;
+    if (isConsole) SetConsoleMode(in, mode & ~(DWORD)ENABLE_ECHO_INPUT);
+
+    std::wstring line = ReadRawLine();
+
+    if (isConsole) SetConsoleMode(in, mode);
+    WriteTo(STD_OUTPUT_HANDLE, L"\r\n");
     return line;
 }
 
@@ -176,6 +249,51 @@ int DoKeys()
             Print(L"    НЕ пригоден: " + Utf8ToWide(k.reason) + L".");
         Print(L"");
     }
+    return 0;
+}
+
+// The credential provider runs inside LogonUI with no console and no window,
+// so when the logon screen misbehaves this log is the only way to see where it
+// stopped. It records steps and the messages the tile shows -- never a
+// password, a PIN or any key material.
+int DoDebug(const std::wstring& arg)
+{
+    if (arg == L"on" || arg == L"off") {
+        if (!plog::SetEnabled(arg == L"on")) {
+            Err(L"Не удалось изменить настройку (нужны права администратора).");
+            return 2;
+        }
+    } else if (!arg.empty()) {
+        Err(L"Укажите on или off.");
+        return 2;
+    }
+
+    Print(std::wstring(L"Журнал провайдера: ") +
+          (plog::Enabled() ? L"включён" : L"выключен"));
+    Print(L"Файл: " + plog::Path());
+    if (plog::Enabled())
+        Print(L"Заблокируйте экран (Win+L), попробуйте вход, затем посмотрите файл.");
+    return 0;
+}
+
+// Whether plugging the key in may log the user in without them first choosing
+// this sign-in option.
+int DoAutoLogon(const std::wstring& arg)
+{
+    if (arg == L"on" || arg == L"off") {
+        if (!settings::SetAutoLogon(arg == L"on")) {
+            Err(L"Не удалось изменить настройку (нужны права администратора).");
+            return 2;
+        }
+    } else if (!arg.empty()) {
+        Err(L"Укажите on или off.");
+        return 2;
+    }
+
+    Print(std::wstring(L"Вход по подключению ключа: ") +
+          (settings::AutoLogon() ? L"включён" : L"выключен"));
+    Print(L"Действует только для записей U2F: в них нечего вводить.");
+    Print(L"Записи FIDO2 требуют PIN, для них плитка лишь выбирается.");
     return 0;
 }
 
@@ -309,9 +427,6 @@ int DoEnroll(const std::wstring& account, VaultMode mode)
 
 int wmain(int argc, wchar_t** argv)
 {
-    // Line-buffered wide console I/O.
-    std::ios::sync_with_stdio(false);
-
     std::wstring mode, account;
     VaultMode vaultMode = VaultMode::Fido2HmacSecret;
     for (int i = 1; i < argc; ++i) {
@@ -321,6 +436,16 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--remove" && i + 1 < argc) { mode = L"remove"; account = argv[++i]; }
         else if (a == L"--test" && i + 1 < argc) { mode = L"test"; account = argv[++i]; }
         else if (a == L"--u2f") vaultMode = VaultMode::U2fPresence;
+        else if (a == L"--autologon") {
+            mode = L"autologon";
+            if (i + 1 < argc) account = argv[++i];  // reuse as the on/off word
+            else account.clear();
+        }
+        else if (a == L"--debug") {
+            mode = L"debug";
+            if (i + 1 < argc) account = argv[++i];  // reuse as the on/off word
+            else account.clear();
+        }
         else if (a == L"--account" && i + 1 < argc) { account = argv[++i]; }
         else if (a == L"--help" || a == L"-h") {
             Print(L"Использование:");
@@ -330,6 +455,9 @@ int wmain(int argc, wchar_t** argv)
             Print(L"  enroll --keys          что умеют вставленные ключи");
             Print(L"  enroll --test ИМЯ      проверить регистрацию");
             Print(L"  enroll --remove ИМЯ    удалить регистрацию");
+            Print(L"  enroll --u2f           регистрация ключа U2F (СЛАБЕЕ, см. README)");
+            Print(L"  enroll --debug on|off  журнал провайдера для разбора входа");
+            Print(L"  enroll --autologon on|off  вход по подключению ключа (U2F)");
             Print(L"");
             Print(L"То же самое в окне: fido2gui.exe");
             return 0;
@@ -344,6 +472,8 @@ int wmain(int argc, wchar_t** argv)
     try {
         if (mode == L"list") return DoList();
         if (mode == L"keys") return DoKeys();
+        if (mode == L"debug") return DoDebug(account);
+        if (mode == L"autologon") return DoAutoLogon(account);
         if (mode == L"remove") return DoRemove(account);
         if (mode == L"test") return DoTest(account);
         if (account.empty()) account = CurrentUserName();

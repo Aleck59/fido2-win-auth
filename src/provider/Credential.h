@@ -61,6 +61,11 @@ public:
     IFACEMETHODIMP Connect(IQueryContinueWithStatus* qcws) override;
     IFACEMETHODIMP Disconnect() override;
 
+    // True once Initialize() has read a U2F record for this account. The
+    // provider needs it to decide whether inserting a key can log in on its
+    // own: a FIDO2 record still wants a PIN typed.
+    bool IsU2f() const { return haveMode_ && mode_ == VaultMode::U2fPresence; }
+
     HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
                        const std::wstring& sid, const std::wstring& domain,
                        const std::wstring& user);
@@ -103,6 +108,7 @@ private:
     std::wstring domain_;
     std::wstring user_;
     std::wstring displayLabel_;
+    std::wstring initialStatus_;  // what the tile says before anything happens
 
     PWSTR fieldStrings_[FI_NUM_FIELDS];  // CoTaskMem-owned per-field strings
     std::wstring pin_;                   // the key PIN typed into FI_PIN

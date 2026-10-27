@@ -1,5 +1,6 @@
 #include "Credential.h"
 
+#include "../common/plog.h"
 #include "../common/store.h"
 #include "../common/token.h"
 #include "../common/unlock.h"
@@ -75,6 +76,10 @@ HRESULT CFido2Credential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
 
     const bool u2f = haveMode_ && mode_ == VaultMode::U2fPresence;
+    plog::Write(L"Initialize: user=" + user_ + L" record=" +
+                (haveMode_ ? (u2f ? L"U2F" : L"FIDO2") : L"(нет или нечитаема)"));
+    initialStatus_ = u2f ? L"Вставьте ключ — вход начнётся сам."
+                         : L"";
     displayLabel_ = u2f ? L"Вход по ключу U2F" : L"Вход по ключу FIDO2";
     if (!user_.empty()) displayLabel_ += L" (" + user_ + L")";
 
@@ -83,7 +88,8 @@ HRESULT CFido2Credential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     if (SUCCEEDED(hr)) hr = SHStrDupWHelper(L"", &fieldStrings_[FI_PIN]);
     if (SUCCEEDED(hr)) hr = SHStrDupWHelper(g_fieldDescriptors[FI_SUBMIT].pszLabel,
                                             &fieldStrings_[FI_SUBMIT]);
-    if (SUCCEEDED(hr)) hr = SHStrDupWHelper(L"", &fieldStrings_[FI_STATUS]);
+    if (SUCCEEDED(hr))
+        hr = SHStrDupWHelper(initialStatus_.c_str(), &fieldStrings_[FI_STATUS]);
     return hr;
 }
 
@@ -131,7 +137,17 @@ IFACEMETHODIMP CFido2Credential::UnAdvise()
 
 IFACEMETHODIMP CFido2Credential::SetSelected(BOOL* autoLogon)
 {
-    *autoLogon = FALSE;  // require the user to touch the key and submit
+    // A U2F tile has nothing to type: the PIN box is hidden because CTAP1 has
+    // no PIN. Starting as soon as the sign-in option is chosen is both what
+    // the user means by choosing it and the only way the key-arrival wait in
+    // Connect() ever gets a chance to run.
+    //
+    // This tile is never the default (the provider reports
+    // CREDENTIAL_PROVIDER_NO_DEFAULT), so this only fires on a deliberate
+    // selection, and QueryContinue lets the user back out.
+    *autoLogon = (haveMode_ && mode_ == VaultMode::U2fPresence) ? TRUE : FALSE;
+    plog::Write(std::wstring(L"SetSelected: autoLogon=") +
+                (*autoLogon ? L"TRUE" : L"FALSE"));
     return S_OK;
 }
 
@@ -145,7 +161,7 @@ IFACEMETHODIMP CFido2Credential::SetDeselected()
         if (events_)
             events_->SetFieldString(AsCredential(), FI_PIN, L"");
     }
-    SetStatus(L"");
+    SetStatus(initialStatus_.c_str());
     return S_OK;
 }
 
@@ -191,7 +207,11 @@ IFACEMETHODIMP CFido2Credential::GetCheckboxValue(DWORD, BOOL*, PWSTR*)
 IFACEMETHODIMP CFido2Credential::GetSubmitButtonValue(DWORD field, DWORD* adjacentTo)
 {
     if (field != FI_SUBMIT || !adjacentTo) return E_INVALIDARG;
-    *adjacentTo = FI_PIN;  // Enter in the PIN box submits
+    // The button is drawn beside the field named here, so that field has to be
+    // one that is actually displayed. For a U2F record the PIN box is hidden,
+    // and pointing at it left the tile with no way to submit at all.
+    *adjacentTo = (haveMode_ && mode_ == VaultMode::U2fPresence) ? FI_STATUS
+                                                                 : FI_PIN;
     return S_OK;
 }
 
@@ -281,6 +301,7 @@ unlock::Outcome CFido2Credential::WaitForU2fKey(const VaultRecord& rec,
             // answer, and the moment a key with a button starts asking to be
             // touched. The full timeout applies here on purpose.
             if (qcws) qcws->SetStatusMessage(L"Ключ обнаружен, проверяем…");
+            plog::Write(L"WaitForU2fKey: ключ подключён, проверяем");
             out = unlock::WithDevice(rec, path, std::string());
             if (out.ok) return out;
 
@@ -297,6 +318,7 @@ unlock::Outcome CFido2Credential::WaitForU2fKey(const VaultRecord& rec,
 
 IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
 {
+    plog::Write(L"Connect: начало");
     SecureClear(password_);
     unlocked_ = false;
     connectError_.clear();
@@ -319,6 +341,8 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
     if (qcws) qcws->SetStatusMessage(L"Поиск ключа безопасности...");
 
     auto devices = token::ListDevices();
+    plog::Write(L"Connect: подключённых ключей " +
+                std::to_wstring(devices.size()));
     if (devices.empty() && rec.mode != VaultMode::U2fPresence) {
         Fail(L"Вставьте ключ безопасности и повторите.");
         return S_OK;
@@ -346,8 +370,11 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
     // Try each present key; the one this record belongs to succeeds, the others
     // answer with a benign error. unlock::WithDevice dispatches on the record's
     // mode, so FIDO2 and U2F records follow the same loop here.
+    const bool u2f = rec.mode == VaultMode::U2fPresence;
     unlock::Outcome out;
     std::wstring lastError = L"Ключ не распознал учётные данные.";
+    bool decided = false;
+
     for (const auto& dev : devices) {
         // Each attempt can wait on a touch, so honour a cancelled logon
         // between keys rather than only at the end.
@@ -357,14 +384,35 @@ IFACEMETHODIMP CFido2Credential::Connect(IQueryContinueWithStatus* qcws)
             return S_OK;
         }
 
-        out = unlock::WithDevice(rec, dev.path, pinUtf8);
+        // For U2F this pass is only a quick question -- "is this key willing
+        // right now?" -- because a key with no button is willing only in the
+        // seconds after it was plugged in. Asking with the full timeout is
+        // what made the logon screen sit there doing nothing.
+        out = unlock::WithDevice(rec, dev.path, pinUtf8,
+                                 u2f ? kU2fProbeTimeoutMs : 0);
+        plog::Write(L"Connect: попытка на вставленном ключе -> " +
+                    (out.ok ? std::wstring(L"успех") : out.error));
         if (out.ok) break;
 
         lastError = out.error;
         // A definite verdict about this record (a cloned-key counter, an
         // unreadable DPAPI blob, a failed decrypt) will not change on another
         // key, so stop rather than making the user touch every one.
-        if (!out.wrongKey) break;
+        if (!out.wrongKey) {
+            decided = true;
+            break;
+        }
+    }
+
+    // Nothing attached would answer. For U2F that is the normal case rather
+    // than a failure: wait for the key to be plugged in and run the assertion
+    // at that moment, which is when a button-less key grants user presence and
+    // when a key with a button starts asking to be touched.
+    if (!out.ok && u2f && !decided) {
+        plog::Write(L"Connect: ждём подключения ключа");
+        out = WaitForU2fKey(rec, qcws, lastError);
+        plog::Write(L"Connect: ожидание завершено -> " +
+                    (out.ok ? std::wstring(L"успех") : lastError));
     }
     SecureClear(pinUtf8);
 
@@ -419,9 +467,11 @@ IFACEMETHODIMP CFido2Credential::GetSerialization(
                                               : connectError_.c_str(),
                         statusText);
         *statusIcon = CPSI_ERROR;
+        plog::Write(L"GetSerialization: нечего отдавать — " + connectError_);
         return S_FALSE;
     }
 
+    plog::Write(L"GetSerialization: отдаём учётные данные LSA");
     std::wstring domain = domain_;
     std::wstring user = user_;
     PWSTR protectedPwd = nullptr;
@@ -482,6 +532,7 @@ IFACEMETHODIMP CFido2Credential::ReportResult(NTSTATUS status, NTSTATUS, PWSTR* 
 {
     *statusText = nullptr;
     *statusIcon = CPSI_NONE;
+    plog::Write(L"ReportResult: NTSTATUS 0x" + std::to_wstring((unsigned long)status));
 
     // The key worked but Windows rejected the password: it was almost
     // certainly changed outside this tool, so point at the fix.

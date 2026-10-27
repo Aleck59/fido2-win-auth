@@ -223,6 +223,18 @@ std::vector<Capabilities> ProbeAll()
     return out;
 }
 
+std::set<std::string> AttachedPaths()
+{
+    std::set<std::string> paths;
+    try {
+        for (const auto& d : ListDevices()) paths.insert(d.path);
+    } catch (const std::exception&) {
+        // An unreadable bus looks the same as an empty one here; the caller
+        // only compares successive answers.
+    }
+    return paths;
+}
+
 bool HasClientPin(const std::string& path)
 {
     fido_init(0);
