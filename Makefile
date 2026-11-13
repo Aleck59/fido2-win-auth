@@ -126,8 +126,12 @@ dist: all
 	cp -f $(ENROLL_EXE) $(GUI_EXE) $(PROVIDER_DLL) $(DIST)/
 	cp -f $(RUNTIME_DLLS) $(DIST)/
 
+# The version lives only in src/common/product.h; read it from there.
+PRODUCT_VERSION := $(shell sed -n 's/^\#define PRODUCT_VERSION *"\(.*\)"/\1/p' src/common/product.h)
+
 installer: dist
-	$(MAKENSIS) -DDIST=$(CURDIR)/$(DIST) installer/installer.nsi
+	$(MAKENSIS) -DDIST=$(CURDIR)/$(DIST) -DPRODUCT_VERSION=$(PRODUCT_VERSION) \
+	    installer/installer.nsi
 
 clean:
 	rm -rf $(BUILD) $(DIST)

@@ -10,5 +10,7 @@
 #define PRODUCT_NAME      "FIDO win auth"
 #define PRODUCT_PUBLISHER "Aleck59"
 #define PRODUCT_COPYRIGHT "Copyright (C) 2026 Aleck59"
-#define PRODUCT_VERSION   "0.0.2.0"
-#define PRODUCT_VERSION_N 0,0,2,0
+// The single place the version is written. The installer reads it from here
+// through the Makefile, so the two cannot disagree.
+#define PRODUCT_VERSION   "0.0.6.0"
+#define PRODUCT_VERSION_N 0,0,6,0

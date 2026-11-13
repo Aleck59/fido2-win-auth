@@ -10,6 +10,11 @@
   !define DIST "dist"
 !endif
 
+; Passed in by the Makefile from src/common/product.h; never written here.
+!ifndef PRODUCT_VERSION
+  !error "PRODUCT_VERSION not defined: build through 'make installer'"
+!endif
+
 ; What people read.
 !define APPNAME     "FIDO win auth"
 !define COMPANY     "Aleck59"
@@ -91,7 +96,7 @@ Section "Install"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPID}" \
       "DisplayIcon" "$INSTDIR\fido2gui.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPID}" \
-      "DisplayVersion" "0.0.2.0"
+      "DisplayVersion" "${PRODUCT_VERSION}"
 SectionEnd
 
 Section "Uninstall"
